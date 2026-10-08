@@ -29,6 +29,7 @@ interface IBriefsCourt {
     function taskOf(uint256 caseId) external view returns (string memory);
     function standardOf(uint256 caseId) external view returns (string memory);
     function briefText(uint256 briefId) external view returns (string memory);
+    function briefOfRequest(bytes32 requestId) external view returns (uint256);
 }
 
 /// @title BriefsJury — everything Briefs says to and hears from the IMD oracle
@@ -64,6 +65,9 @@ contract BriefsJury is Ownable2Step {
     BriefsText public text;
     /// @notice answers delivered on chain: source (IMD's Intake) => its request id => hash of the attestation
     mapping(address => mapping(bytes32 => bytes32)) public delivered;
+    /// @notice whether that answer passed the cheap checks when it arrived (a true/false answer from the panel the
+    ///         hearing ordered, issued within its window): only such an answer makes Briefs wait the long grace
+    mapping(address => mapping(bytes32 => bool)) public landable;
 
     uint8 internal constant HEARING = 3; // Briefs.BriefStatus.Hearing
 
@@ -80,6 +84,8 @@ contract BriefsJury is Ownable2Step {
     error BadSignature();
     error AlreadyBound();
     error NotHearing();
+    uint256 public constant CLOCK_SKEW = 2 minutes;
+
     error AnsweredBeforeAsked();
     error Expired();
     error WrongPanel();
@@ -192,11 +198,29 @@ contract BriefsJury is Ownable2Step {
     ///         the hearing's own setup source (the Intake) delivered.
     function onImdAnswer(bytes32 requestId, ImdOracle.AttestationV2 calldata att, bytes calldata) external {
         delivered[msg.sender][requestId] = keccak256(abi.encode(att));
+        if (_landable(requestId, att)) landable[msg.sender][requestId] = true;
         emit AnswerDelivered(msg.sender, requestId);
     }
 
-    /// @notice Whether IMD's Intake has delivered an answer for the running hearing of `briefId` (Briefs then waits
-    ///         longer before a mistrial, so the keeper can land it).
+    /// @dev Never reverts (a failed callback would lose IMD's delivery): anything unexpected is simply not landable.
+    function _landable(bytes32 requestId, ImdOracle.AttestationV2 calldata att) private view returns (bool) {
+        (bool ok, bytes memory ret) = address(court).staticcall{gas: 30_000}(abi.encodeCall(IBriefsCourt.briefOfRequest, (requestId)));
+        if (!ok || ret.length < 32) return false;
+        uint256 briefId = abi.decode(ret, (uint256));
+        if (briefId == 0) return false;
+        (ok, ret) = address(court).staticcall{gas: 60_000}(abi.encodeCall(IBriefsCourt.getBrief, (briefId)));
+        if (!ok || ret.length < 12 * 32) return false;
+        IBriefsCourt.BriefView memory b = abi.decode(ret, (IBriefsCourt.BriefView));
+        (bool isBool,) = ImdOracle.decodeBool(att.answer);
+        return b.requestId == requestId && isBool && att.answerType == ImdOracle.ANSWER_TYPE_BOOL
+            && att.chainId == oracles[b.oracleId].chainId && att.panelSize == b.panelSize && att.quorum == b.quorum
+            && att.agreed >= att.quorum && uint256(att.issuedAt) + CLOCK_SKEW >= b.heardAt
+            && att.issuedAt <= uint256(b.heardAt) + b.answerTimeout;
+    }
+
+    /// @notice Whether IMD's Intake has delivered an answer for the running hearing of `briefId` that can land (Briefs
+    ///         then waits longer before a mistrial, so anyone can relay it). An answer that could never land doesn't
+    ///         hold the docket.
     function wasDelivered(uint256 briefId) external view returns (bool) {
         IBriefsCourt.BriefView memory b = court.getBrief(briefId);
         // a requester that can't name its source must never stop a mistrial: treat it as nothing delivered
@@ -204,7 +228,7 @@ contract BriefsJury is Ownable2Step {
             address(oracles[b.oracleId].requester).staticcall{gas: 100_000}(abi.encodeCall(IImdRequester.answerSource, ()));
         if (!ok || ret.length < 32) return false;
         address source = address(uint160(abi.decode(ret, (uint256))));
-        return source != address(0) && delivered[source][b.requestId] != bytes32(0);
+        return source != address(0) && landable[source][b.requestId];
     }
 
     /// @notice The verdict an attestation gives for the running hearing of `briefId`, after every check: issued
@@ -220,7 +244,10 @@ contract BriefsJury is Ownable2Step {
         if (att.questionHash != _questionHash(b, briefId, att.fromBlock, att.toBlock)) revert WrongQuestion();
         address source = oracles[b.oracleId].requester.answerSource();
         if (source != address(0) && delivered[source][b.requestId] != keccak256(abi.encode(att))) revert NotDelivered();
-        if (att.issuedAt < b.heardAt) revert AnsweredBeforeAsked();
+        // IMD's clock and the sequencer's may differ a little: an answer stamped up to CLOCK_SKEW before the hearing
+        // opened still counts (it must still be the one delivered for this hearing's request, with its question)
+        // (only with an on-chain source: without one, anyone can buy an answer to the same question)
+        if (uint256(att.issuedAt) + (source != address(0) ? CLOCK_SKEW : 0) < b.heardAt) revert AnsweredBeforeAsked();
         if (att.issuedAt > uint256(b.heardAt) + b.answerTimeout) revert Expired();
         if (block.timestamp > att.expiresAt) revert Expired();
         if (att.panelSize != b.panelSize || att.quorum != b.quorum || att.agreed < att.quorum) revert WrongPanel();

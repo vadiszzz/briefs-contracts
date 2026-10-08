@@ -585,6 +585,7 @@ contract FundsHandler is Test {
     bool public shareLocked; // withdrawPlatform failed while something was owed (a sink must never lock the share)
 
     function withdraw() external {
+        if (isBlocked[b.treasury()]) return; // a blocked treasury stops withdrawals until the owner changes it (accepted)
         bool owed = b.platformOwed() != 0;
         try b.withdrawPlatform() {} catch {
             if (owed) shareLocked = true;
@@ -602,6 +603,39 @@ contract FundsHandler is Test {
 
     function warp(uint256 dt) external {
         vm.warp(block.timestamp + bound(dt, 1, 4 days));
+    }
+
+    // ---- the IMD token refusing payments to one actor (its block list): payouts are held, never lost
+
+    mapping(address => bool) public isBlocked;
+    address[] blockedList;
+
+    function block_(uint256 who) external {
+        isBlocked[actors[who % 4]] = true;
+        blockedList.push(actors[who % 4]);
+        // any transfer from Briefs to this actor reverts, whatever the amount (a calldata prefix match)
+        vm.mockCallRevert(address(imd), abi.encodePacked(IERC20.transfer.selector, abi.encode(actors[who % 4])), "blocked");
+    }
+
+    function unblockAll() external {
+        for (uint256 i; i < blockedList.length; i++) isBlocked[blockedList[i]] = false;
+        delete blockedList;
+        vm.clearMockedCalls();
+    }
+
+    function claimUnpaid(uint256 who) external {
+        address a = actors[who % 4];
+        uint256 held = b.unpaid(a);
+        uint256 before = imd.balanceOf(a);
+        vm.prank(a);
+        try b.claimUnpaid() {
+            require(imd.balanceOf(a) == before + held && b.unpaid(a) == 0, "claimUnpaid paid the wrong amount");
+        } catch {}
+    }
+
+    function raiseReserve(uint256 ci) external {
+        if (caseIds.length == 0) return;
+        try b.raiseReserve(caseIds[ci % caseIds.length]) {} catch {}
     }
 
     // ---- owner paths (this handler owns Briefs): none of them may move IMD the contract owes
@@ -682,7 +716,7 @@ contract FundsInvariantTest is StdInvariant, AuditBase {
     /// of every brief still waiting on a docket (refunded if never heard), and the fee less the jury's price of the
     /// brief being heard (split on its verdict, handed back on a mistrial)
     function _liabilities() internal view returns (uint256 total) {
-        total = b.platformOwed();
+        total = b.platformOwed() + b.unpaidTotal(); // payments the token refused, held for their payees
         for (uint256 i; i < h.casesLength(); i++) {
             uint256 c = h.caseIds(i);
             Briefs.Case memory k = b.getCase(c);

@@ -322,7 +322,7 @@ contract GatewayTest is Test {
         assertEq(uint8(b.getBrief(id).status), uint8(Briefs.BriefStatus.Sustained));
     }
 
-    /// an answer delivered but never landable still ends in a mistrial, an hour after the timeout
+    /// an answer delivered but never landable (here: below quorum) doesn't hold the docket: the usual 2-minute grace
     function test_ADeliveredButUnlandableAnswerStillEndsInAMistrial() public {
         uint256 c = _case();
         uint256 id = _file(c, alice, "My brief");
@@ -331,14 +331,55 @@ contract GatewayTest is Test {
         a.agreed = 3; // below quorum: the jury refuses it
         (uint8 v, bytes32 r, bytes32 s_) = vm.sign(key, dg.digest(ImdOracle.domainSeparatorV("2", block.chainid, address(b.jury())), a));
         sig = abi.encodePacked(r, s_, v);
-        _complete(id, a, sig);
+        assertTrue(_complete(id, a, sig));
+        assertFalse(b.jury().wasDelivered(id));
         vm.expectRevert(BriefsJury.WrongPanel.selector);
         b.fulfill(id, a, sig);
-        vm.warp(b.getBrief(id).heardAt + 4 minutes + 1 hours);
+        vm.warp(b.getBrief(id).heardAt + 4 minutes + 2 minutes);
         vm.expectRevert(Briefs.TooEarly.selector);
         b.mistrial(c);
         vm.warp(block.timestamp + 1);
         b.mistrial(c);
         assertEq(uint8(b.getBrief(id).status), uint8(Briefs.BriefStatus.Mistrial));
+    }
+
+    /// a landable answer holds the mistrial off for 6 hours, so a keeper outage can't void it; then a mistrial
+    function test_ALandableDeliveryHoldsTheMistrialSixHours() public {
+        uint256 c = _case();
+        uint256 id = _file(c, alice, "My brief");
+        vm.warp(block.timestamp + 2 minutes);
+        (ImdOracle.AttestationV2 memory a, bytes memory sig) = _answer(id, true, 0x68);
+        assertTrue(_complete(id, a, sig));
+        assertTrue(b.jury().wasDelivered(id));
+        vm.warp(b.getBrief(id).heardAt + 4 minutes + 6 hours);
+        vm.expectRevert(Briefs.TooEarly.selector);
+        b.mistrial(c);
+        b.fulfill(id, a, sig); // still valid: anyone can relay it
+        assertEq(b.getCase(c).precedent, id);
+    }
+
+    /// IMD's clock may run up to 2 minutes behind the chain's: the answer the Intake delivered still lands
+    function test_ASmallClockSkewIsTolerated() public {
+        uint256 c = _case();
+        uint256 id = _file(c, alice, "My brief");
+        vm.warp(block.timestamp + 1 minutes);
+        (ImdOracle.AttestationV2 memory a,) = _answer(id, true, 0x69);
+        a.issuedAt = b.getBrief(id).heardAt - 90;
+        (uint8 v, bytes32 r, bytes32 s_) = vm.sign(key, dg.digest(ImdOracle.domainSeparatorV("2", block.chainid, address(b.jury())), a));
+        bytes memory sig = abi.encodePacked(r, s_, v);
+        assertTrue(_complete(id, a, sig));
+        assertTrue(b.jury().wasDelivered(id));
+        b.fulfill(id, a, sig);
+        assertEq(b.getCase(c).precedent, id);
+        // beyond 2 minutes it is refused
+        uint256 id2 = _file(c, bob, "My second brief");
+        (a,) = _answer(id2, true, 0x6a);
+        a.issuedAt = b.getBrief(id2).heardAt - 121;
+        (v, r, s_) = vm.sign(key, dg.digest(ImdOracle.domainSeparatorV("2", block.chainid, address(b.jury())), a));
+        sig = abi.encodePacked(r, s_, v);
+        _complete(id2, a, sig);
+        assertFalse(b.jury().wasDelivered(id2));
+        vm.expectRevert(BriefsJury.AnsweredBeforeAsked.selector);
+        b.fulfill(id2, a, sig);
     }
 }

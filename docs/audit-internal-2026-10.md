@@ -33,7 +33,7 @@ Test suite after the fixes: 83 tests, all passing, including an exact solvency i
 - **Fee-on-transfer token (Low).** The contract assumes IMD is a plain ERC20. Confirm the Robinhood Chain IMD before deploying.
 - **Surplus IMD is locked (Low).** IMD sent outside the accounting (including any refund IMD might send for unanswered requests) can't leave the contract. Ask IMD whether unanswered requests are refunded; if so, add a sweep of anything above liabilities to the treasury.
 - **`caseFee` can change instantly (Low).** A malicious owner could raise it in front of a pending `openCase` if the creator's allowance covers it. Bounded by `setParams`; consider a delay or a `maxCaseFee` argument.
-- **Push payments (Low).** If IMD could blacklist an address, a blacklisted winner would freeze their case. Standard bridged IMD can't.
+- ~~**Push payments (Low).**~~ Fixed in the fourth review: the IMD token on Robinhood Chain *can* block addresses, so a refused payment is now held for its payee instead.
 - **Late answer race (Low).** After the 4-minute window plus 2-minute grace, anyone (usually the leader) can call `mistrial` ahead of a COOKED answer that was issued on time but not yet delivered. Our keeper delivers within seconds.
 - **Attester rotation doesn't reach running cases (Info).** A compromised IMD key can't be revoked for cases already using it.
 - **Spam delays settlement, at a price (Info).** Unanswerable briefs take about 6 minutes each; at the 1 IMD minimum, about 1,000 IMD buys about 4 days of delay.
@@ -83,7 +83,7 @@ Three independent reviews again (funds; oracle integrity; liveness and admin), t
 | 10 | Info | More invisible characters (U+180B–180F, FFF9–FFFB, 1D173–1D17A) and «» look-alikes (❮❯ ⟨⟩ 〈〉 ︽︾); runs of whitespace a server might tidy (a different questionHash) | Rejected by `BriefsText`; the site strips or converts them, and collapses whitespace runs |
 | 11 | Info | Wallet and keeper gas estimates can follow a cheaper path (the oracle failing at estimate time) | The site and the keeper send calls that may open a hearing with at least 4M gas |
 
-Still accepted: push payments (a blacklisting token could block a payout, a mistrial refund or a skip; IMD can't blacklist), the late-answer race when IMD has not delivered on chain yet, an owner-set `caseFee` without delay, the holder check at filing only, and a broken holder token only stopping entries to its own cases.
+Still accepted: the late-answer race when IMD has not delivered on chain yet, an owner-set `caseFee` without delay, the holder check at filing only, and a broken holder token only stopping entries to its own cases.
 
 ## Third review: the IMD swarm audit (October 2026)
 
@@ -104,3 +104,19 @@ An external review by the IMD oracle swarm (`template: audit`, [job 21511e3a](ht
 | 11 | Info | The solvency invariant never drove the owner paths | The handler now also owns `Briefs`: `setParams`, `setTreasury` (including the refused addresses), rewards sinks (honest, greedy, re-entering, losing their code) and holders-only cases. Balance still equals liabilities to the wei, and a new invariant checks that the platform share can always be withdrawn |
 
 Still accepted after this review: commit-reveal (finding 8); `_checkTreasury` checks the requester of the setup that is live when the treasury is set, not of setups applied later (an owner mistake either way, visible for 7 days); the site reads the live setup with `jury.latest()` right before `openCase`, so a setup applied in between only costs the creator a reverted transaction.
+
+## Fourth review: the IMD swarm re-audit (October 2026)
+
+The IMD swarm audited the fixed code ([job 8e03ebfb](https://explorer.imd.fun/jobs/8e03ebfb-e610-4f68-8fe5-71ab8251a8d2), commit `54a47f7`): 1 Medium, 4 Low, 3 Info. All addressed below; a fresh reviewer then re-checked the fixes and its follow-ups are folded in. Suite: 135 Foundry tests, all passing.
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 1 | Medium | The IMD token on Robinhood Chain is a LayerZero OFT with an owner block list (`blocked(address)`), so our accepted "push payments" premise was wrong: one blocked leader, challenger or queued author made the pot payout, the mistrial refund or the skip refund revert, freezing the case and its pot | `_pay` tries the transfer and, if the token refuses, keeps the amount in `unpaid[payee]` (`PaymentHeld`); the payee pulls it with `claimUnpaid()` once the token lets them (to themselves only). Verdicts, mistrials, skips and settlement never depend on a payee. The solvency invariant counts `unpaidTotal`, and its handler now blocks and unblocks actors, claims held payments and raises reserves. *Tests: `test_Fixed_Blocked*` in `test/audit/Liveness.t.sol`* |
+| 2 | Low | If IMD prices a hearing above a running case's reserve, the case refuses every entry until its deadline and the leader wins by default | `raiseReserve(caseId)`: once the owner raises `maxOracleFee`, anyone (the keeper does it) lifts a running case's reserve to it, never down and always below the case's fee. Each hearing still pays IMD's actual price. The keeper raises a case only when IMD's price is past its reserve and entries are open. Accepted: time lost while entries were refused is not given back, and a case whose fee is at or below the new `maxOracleFee` can't be raised |
+| 3 | Low | An answer IMD delivered on chain could be voided by a mistrial if nobody relayed it within an hour | `DELIVERED_GRACE` is 6 hours (IMD's answers stay valid 24 h; anyone can relay); the keeper relays within seconds. Only an answer that passes the cheap checks on arrival (`BriefsJury.landable`: a true/false answer from the ordered panel, issued within the window) earns the long grace, so a delivery that could never land doesn't hold the docket |
+| 4 | Low | `BriefsText.check` paid the whole forbidden list for every character: a 500-byte ASCII filing needed about 5.6M gas, above the 4M the site and keeper sent | ASCII takes a short path and other characters are looked up by range (600 ASCII bytes: about 0.2M gas, was 2.2M); the site and the keeper now send 6M for calls that may open a hearing (the longest brief in any script needs about 4.3M; only gas used is paid). *Test: `test_Reaudit_R4_*`* |
+| 5 | Low | No tolerance for clock skew between IMD's signer and the sequencer: an answer stamped one second before its hearing could never land | `CLOCK_SKEW` of 2 minutes on the lower bound for setups with an on-chain answer source (the answer must still be the one the Intake delivered for this hearing, with its question); without one the bound stays strict |
+| 6 | Info | More invisible format characters (U+206A–206F, U+1BCA0–1BCA3, U+FFF0–FFF8, the rest of the tag plane), «» look-alikes (⫷⫸ ⦑⦒ ⦕⦖ ︿﹀ ᐸᐳ), noncharacters and private use passed the text rules | Rejected on chain; the site drops or converts them first. The site's list was checked against the contract's over every code point |
+| 7 | Info | An Intake that keeps charging but stops answering burns each challenger's jury price in a mistrial; a running case can't change its jury | Accepted (trust in IMD; a case's jury is fixed by design). Telegram alerts now warn when the last 3 hearings court-wide all ended in a JURY SPLIT |
+| 8 | Info | Live ownership was a single EOA | The redeploy hands Briefs, BriefsJury and the adapter to a multisig (`NEW_OWNER`) |
+

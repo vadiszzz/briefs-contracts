@@ -407,7 +407,7 @@ contract BriefsTest is Test {
             b.fulfill(bid_, w, bad);
         }
         (w,) = _att(id, true);
-        w.issuedAt = b.getBrief(id).heardAt - 1;
+        w.issuedAt = b.getBrief(id).heardAt - 2 minutes - 1; // beyond the allowed clock skew
         bad = _sign(key, w);
         {
             uint256 bid_ = b.briefOfRequest(w.requestId);
@@ -1304,6 +1304,12 @@ contract BriefsTest is Test {
 
     function _utf8(uint24 cp) internal pure returns (bytes memory) {
         if (cp < 0x800) return abi.encodePacked(bytes1(uint8(0xc0 | (cp >> 6))), bytes1(uint8(0x80 | (cp & 0x3f))));
+        if (cp >= 0x10000) {
+            return abi.encodePacked(
+                bytes1(uint8(0xf0 | (cp >> 18))), bytes1(uint8(0x80 | ((cp >> 12) & 0x3f))),
+                bytes1(uint8(0x80 | ((cp >> 6) & 0x3f))), bytes1(uint8(0x80 | (cp & 0x3f)))
+            );
+        }
         return abi.encodePacked(
             bytes1(uint8(0xe0 | (cp >> 12))), bytes1(uint8(0x80 | ((cp >> 6) & 0x3f))), bytes1(uint8(0x80 | (cp & 0x3f)))
         );
@@ -1353,5 +1359,96 @@ contract BriefsTest is Test {
         b.fileBrief(c, B2);
         b.hear(c); // the stalled one is handed back as before
         assertEq(uint8(_status(a1)), uint8(Briefs.BriefStatus.Unheard));
+    }
+
+    // ------------------------------------------------------------ IMD swarm re-audit (Oct 2026)
+
+    /// R2: if IMD's price passes a running case's reserve, the owner raises maxOracleFee and anyone lifts the case
+    function test_Reaudit_R2_ARunningCaseCanFollowARisenJuryPrice() public {
+        uint256 c = _case();
+        requester.setFee(1.2 ether);
+        vm.prank(alice);
+        vm.expectRevert(Briefs.OracleTooExpensive.selector);
+        b.fileBrief(c, B1);
+        vm.expectRevert(Briefs.BadParams.selector);
+        b.raiseReserve(c); // nothing to raise to yet
+        Briefs.Params memory p = _params();
+        p.maxOracleFee = 1.5 ether;
+        p.minFee = 2 ether;
+        b.setParams(p);
+        vm.prank(carol);
+        b.raiseReserve(c); // anyone
+        assertEq(b.getCase(c).reserve, 1.5 ether);
+        uint256 a1 = _file(c, alice, B1);
+        assertEq(b.getCase(c).hearing, a1);
+        assertEq(b.getBrief(a1).oracleReserve, 1.2 ether); // the price actually paid
+        _judge(a1, true);
+        assertEq(b.getCase(c).pot, SEED + (FEE - 1.2 ether) * 8_000 / 10_000);
+        // never at or above the case's fee, never down
+        p.maxOracleFee = 5 ether;
+        p.minFee = 6 ether;
+        b.setParams(p);
+        vm.expectRevert(Briefs.BadParams.selector);
+        b.raiseReserve(c);
+    }
+
+    /// R3: an answer IMD delivered on chain has 6 hours to be relayed before a mistrial can void it
+    function test_Reaudit_R3_ADeliveredAnswerGetsSixHours() public view {
+        assertEq(b.DELIVERED_GRACE(), 6 hours);
+    }
+
+    /// R4: the text rules look characters up by range (plain ASCII takes a short path), so a full-length check stays
+    ///     cheap, and the longest brief of any script opens its hearing within the 6M the site and keeper send
+    function test_Reaudit_R4_TextRulesAreCheapAndTheLongestBriefFitsTheGasFloor() public {
+        BriefsText t = new BriefsText();
+        bytes memory x = bytes(_repeat("a", 600));
+        uint256 g = gasleft();
+        t.check(x, 1, 600, 600);
+        assertLt(g - gasleft(), 300_000, "600 ASCII bytes");
+        x = bytes(_repeat(unicode"ж", 300));
+        g = gasleft();
+        t.check(x, 1, 600, 600);
+        assertLt(g - gasleft(), 700_000, "300 Cyrillic letters");
+        uint256 c = _case();
+        string[3] memory longest = [_repeat("a", 500), _repeat(unicode"ж", 250), _repeat(unicode"🐉", 125)];
+        for (uint256 i; i < 3; i++) {
+            vm.cool(address(b));
+            vm.cool(address(imd));
+            vm.prank(alice);
+            uint256 id = b.fileBrief{gas: 6_000_000}(c, longest[i]);
+            assertEq(b.getCase(c).hearing, id);
+            _judge(id, false);
+        }
+    }
+
+    function _repeat(string memory unit, uint256 n) internal pure returns (string memory out) {
+        for (uint256 i; i < n; i++) out = string.concat(out, unit);
+    }
+
+    /// R5: see test_ASmallClockSkewIsTolerated in Gateway.t.sol (the skew applies with an on-chain answer source);
+    ///     without one, the strict bound stays (anyone can buy an answer to the same question there)
+    function test_Reaudit_R5_NoSkewWithoutAnOnChainSource() public {
+        uint256 c = _case();
+        uint256 a1 = _file(c, alice, B1);
+        vm.warp(block.timestamp + 1 minutes);
+        ImdOracle.AttestationV2 memory a = _attWith(a1, abi.encode(true), 11, 6, 6);
+        a.issuedAt = b.getBrief(a1).heardAt - 1;
+        bytes memory sig = _sign(key, a);
+        vm.expectRevert(BriefsJury.AnsweredBeforeAsked.selector);
+        b.fulfill(a1, a, sig);
+    }
+
+    /// R6: more invisible format characters, noncharacters, private use and look-alikes of «» are refused
+    function test_Reaudit_R6_MoreTextGapsAreClosed() public {
+        BriefsText t = new BriefsText();
+        uint24[26] memory cps = [
+            uint24(0x206a), 0x206f, 0x1bca0, 0x1bca3, 0xfff0, 0xfff8, 0xe0080, 0xe0fff, 0x2af7, 0x2af8, 0x2991, 0x2992,
+            0x2995, 0x2996, 0x1438, 0x1433, 0xfe3f, 0xfe40, 0xffff, 0xfffe, 0xfdd0, 0xfdef, 0x1ffff, 0xe000, 0xf0000, 0x10ffff
+        ];
+        for (uint256 i; i < cps.length; i++) {
+            vm.expectRevert(BriefsText.BadText.selector);
+            t.check(bytes.concat("a", _utf8(cps[i]), "b"), 1, 500, 500);
+        }
+        t.check(bytes.concat("a", _utf8(0x1f409), _utf8(0xfdcf), _utf8(0xfdf0), "b"), 1, 500, 500); // around them: fine
     }
 }

@@ -108,25 +108,44 @@ contract BriefsText {
     /// @dev Text must reach the IMD server unchanged inside a JSON string: strict UTF-8, no control
     ///      characters, no `"` or `\`, no quote marks that could close the «» around it, no bidi or
     ///      zero-width characters, no whitespace at either end (JS trim() would strip it) and no two whitespace
-    ///      characters in a row (a server that tidies spaces would hash a different question), and no << or >>.
+    ///      characters in a row (a server that tidies spaces would hash a different question), no << or >>, and no
+    ///      noncharacters or private-use code points.
     ///      minLen and maxLen count characters (Unicode code points); maxBytes caps the UTF-8 bytes.
     function check(bytes calldata t, uint256 minLen, uint256 maxLen, uint256 maxBytes) external pure {
         uint256 len = t.length;
         if (len < minLen || len > maxBytes || len > maxLen * 4) revert BadText(); // a character takes 1 to 4 bytes
         uint256 chars;
-        uint256 first;
         uint256 last;
         uint256 seen; // the last character that is not a combining mark or a thin, wide or no-break space
         uint256 i;
         while (i < len) {
-            uint256 c = uint8(t[i]);
-            uint256 cp;
-            uint256 n;
+            uint256 c;
+            assembly ("memory-safe") {
+                c := byte(0, calldataload(add(t.offset, i))) // i < len: inside t
+            }
+            // ASCII, most of any text, takes a short path (none of the lists below holds an ASCII character)
             if (c < 0x80) {
                 if (c < 0x20 || c == 0x22 || c == 0x5c || c == 0x7f) revert BadText();
-                cp = c;
-                n = 1;
-            } else if (c >= 0xc2 && c <= 0xdf) {
+                if (chars == 0) {
+                    if (c == 0x20) revert BadText(); // no whitespace at the start
+                } else if (c == 0x20 && _isSpace(last)) {
+                    revert BadText();
+                } else if ((c == 0x3c || c == 0x3e) && c == seen) {
+                    // << or >> would read as the «» the question quotes with (also with a combining mark or a thin
+                    // space between the two, which renders much the same)
+                    revert BadText();
+                }
+                last = c;
+                seen = c;
+                unchecked {
+                    ++i;
+                    ++chars;
+                }
+                continue;
+            }
+            uint256 cp;
+            uint256 n;
+            if (c >= 0xc2 && c <= 0xdf) {
                 cp = c & 0x1f;
                 n = 2;
             } else if (c >= 0xe0 && c <= 0xef) {
@@ -140,7 +159,10 @@ contract BriefsText {
             }
             if (i + n > len) revert BadText();
             for (uint256 k = 1; k < n; ++k) {
-                uint256 cc = uint8(t[i + k]);
+                uint256 cc;
+                assembly ("memory-safe") {
+                    cc := byte(0, calldataload(add(t.offset, add(i, k)))) // i + n <= len, checked above
+                }
                 if (cc & 0xc0 != 0x80) revert BadText();
                 cp = (cp << 6) | (cc & 0x3f);
             }
@@ -148,36 +170,49 @@ contract BriefsText {
                 (n == 3 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff))) || (n == 4 && (cp < 0x10000 || cp > 0x10ffff))
                     || _forbidden(cp)
             ) revert BadText();
-            if (i == 0) first = cp;
-            else if (_isSpace(cp) && _isSpace(last)) revert BadText();
-            // << or >> would read as the «» the question quotes with
-            // (also with a combining mark or a thin space between the two, which renders much the same)
-            else if ((cp == 0x3c || cp == 0x3e) && cp == seen) revert BadText();
+            if (chars == 0) {
+                if (_isSpace(cp)) revert BadText(); // no whitespace at the start
+            } else if (_isSpace(cp) && _isSpace(last)) {
+                revert BadText();
+            }
             last = cp;
             if (!_isFiller(cp)) seen = cp;
             i += n;
             ++chars;
         }
         if (chars < minLen || chars > maxLen) revert BadText();
-        if (_isSpace(first) || _isSpace(last)) revert BadText();
+        if (_isSpace(last)) revert BadText(); // nor at the end
     }
 
+    /// @dev Code points (all at or above 0x80) a text may not hold, looked up by range so common text stays cheap:
+    ///      C1 controls; bidi, zero-width, invisible and deprecated format characters; variation selectors and tag
+    ///      characters (they can hide instructions the site never shows); look-alikes of the «» the question quotes
+    ///      with; and noncharacters and private use (a server may replace or drop them: a different question).
     function _forbidden(uint256 cp) private pure returns (bool) {
-        return (cp >= 0x80 && cp <= 0x9f) || cp == 0xad || cp == 0x61c || cp == 0x180e || cp == 0xab || cp == 0xbb
-            || cp == 0x2039 || cp == 0x203a || (cp >= 0x3008 && cp <= 0x300f) || cp == 0xff02
-            || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2060 && cp <= 0x2069)
-            || cp == 0xfeff
-            // invisible fillers, variation selectors and tag characters can hide instructions the site never shows
-            || cp == 0x34f || cp == 0x115f || cp == 0x1160 || cp == 0x17b4 || cp == 0x17b5 || cp == 0x2028 || cp == 0x2029
-            || cp == 0x2800 || cp == 0x3164 || cp == 0xffa0 || (cp >= 0xfe00 && cp <= 0xfe0f)
-            || (cp >= 0xe0000 && cp <= 0xe007f) || (cp >= 0xe0100 && cp <= 0xe01ef)
-            || (cp >= 0x180b && cp <= 0x180f) || (cp >= 0xfff9 && cp <= 0xfffb) || (cp >= 0x1d173 && cp <= 0x1d17a)
-            // look-alikes of the «» the question quotes with
-            || cp == 0x226a || cp == 0x226b || cp == 0x27ea || cp == 0x27eb || cp == 0x2aa1 || cp == 0x2aa2
-            || cp == 0x276e || cp == 0x276f || cp == 0x27e8 || cp == 0x27e9 || cp == 0x2329 || cp == 0x232a
-            || cp == 0xfe3d || cp == 0xfe3e || cp == 0x2770 || cp == 0x2771 || cp == 0x276c || cp == 0x276d
-            || cp == 0x29fc || cp == 0x29fd || cp == 0x22d8 || cp == 0x22d9 || cp == 0xfe64 || cp == 0xfe65 || cp == 0xff1c
-            || cp == 0xff1e || cp == 0x02c2 || cp == 0x02c3;
+        if (cp < 0x2000) {
+            if (cp < 0x100) return cp <= 0x9f || cp == 0xab || cp == 0xad || cp == 0xbb;
+            if (cp < 0x1000) return cp == 0x2c2 || cp == 0x2c3 || cp == 0x34f || cp == 0x61c;
+            return cp == 0x115f || cp == 0x1160 || cp == 0x1433 || cp == 0x1438 || cp == 0x17b4 || cp == 0x17b5
+                || (cp >= 0x180b && cp <= 0x180f);
+        }
+        if (cp < 0x3000) {
+            if (cp < 0x2100) {
+                return (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2028 && cp <= 0x202e) || cp == 0x2039 || cp == 0x203a
+                    || (cp >= 0x2060 && cp <= 0x206f);
+            }
+            return cp == 0x226a || cp == 0x226b || cp == 0x22d8 || cp == 0x22d9 || cp == 0x2329 || cp == 0x232a
+                || (cp >= 0x276c && cp <= 0x2771) || (cp >= 0x27e8 && cp <= 0x27eb) || cp == 0x2800 || cp == 0x2991
+                || cp == 0x2992 || cp == 0x2995 || cp == 0x2996 || cp == 0x29fc || cp == 0x29fd || cp == 0x2aa1
+                || cp == 0x2aa2 || cp == 0x2af7 || cp == 0x2af8;
+        }
+        if (cp < 0xe000) return (cp >= 0x3008 && cp <= 0x300f) || cp == 0x3164;
+        if (cp < 0x10000) {
+            return cp <= 0xf8ff || (cp >= 0xfdd0 && cp <= 0xfdef) || (cp >= 0xfe00 && cp <= 0xfe0f)
+                || (cp >= 0xfe3d && cp <= 0xfe40) || cp == 0xfe64 || cp == 0xfe65 || cp == 0xfeff || cp == 0xff02
+                || cp == 0xff1c || cp == 0xff1e || cp == 0xffa0 || (cp >= 0xfff0 && cp <= 0xfffb) || cp >= 0xfffe;
+        }
+        return (cp & 0xfffe) == 0xfffe || (cp >= 0x1bca0 && cp <= 0x1bca3) || (cp >= 0x1d173 && cp <= 0x1d17a)
+            || (cp >= 0xe0000 && cp <= 0xe0fff) || cp >= 0xf0000;
     }
 
     /// combining marks and every space but the plain one: barely visible between two brackets

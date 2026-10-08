@@ -23,7 +23,8 @@ import {BriefsJury} from "./BriefsJury.sol";
 ///         then the standing precedent's author takes 100% of the pot. A case runs once and never restarts.
 ///
 ///         Each entry fee waits in escrow until the brief's verdict. When its hearing opens, the oracle's price
-///         pays the jury (at most the case's reserve, fixed when the case opens). On a verdict, of the rest,
+///         pays the jury (at most the case's reserve: maxOracleFee when the case opens, which raiseReserve can
+///         only lift). On a verdict, of the rest,
 ///         creatorBps to the case creator (accrues on the case, claimed by the creator), platformBps to the
 ///         platform, the rest into the pot. A mistrial hands the rest back to the brief's author; a brief that is
 ///         never heard gets its whole fee back. The pot is never used to pay the jury.
@@ -32,8 +33,8 @@ import {BriefsJury} from "./BriefsJury.sol";
 ///         receive up to half of it (MAX_REWARDS_BPS), set only after a public CONFIG_DELAY and only for fees
 ///         accrued after the change. Neither the owner nor the sink can touch pots or creator earnings.
 ///
-///         The owner tunes numbers within hard bounds (new cases only: a case fixes its split, jury, reserve,
-///         panel, answer window and brief length when it opens), pauses new cases (entries, hearings and payouts keep
+///         The owner tunes numbers within hard bounds (new cases only: a case fixes its split, jury, panel,
+///         answer window and brief length when it opens; its jury reserve can only be lifted, see raiseReserve), pauses new cases (entries, hearings and payouts keep
 ///         running). Opening a case costs a flat caseFee, paid to the treasury.
 ///
 ///         The owner can open holders-only cases (minHold > 0): only addresses holding at least that much of
@@ -66,7 +67,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     uint256 public constant STALL_GRACE = 3 days; // see skipStalled
     uint256 public constant STALL_WAIT = 6 hours; // see skipStalled
     uint256 public constant MISTRIAL_GRACE = 2 minutes; // a timely answer can still land this long after the timeout
-    uint256 public constant DELIVERED_GRACE = 1 hours; // the same, once IMD's Intake has delivered an answer on chain
+    // the same, once IMD's Intake has delivered an answer on chain: long enough to outlast a keeper outage (anyone can
+    // relay the answer; IMD's answers stay valid for 24 h), short enough that an unusable delivery doesn't hold the docket
+    uint256 public constant DELIVERED_GRACE = 6 hours;
     uint256 internal constant STEPS = 16; // briefs skipped at most per call while looking for the next hearing
     uint256 internal constant QUOTE_GAS = 100_000; // gas the requester's fee() gets
     uint256 internal constant SINK_GAS = 500_000; // gas a rewards sink gets to pull its part
@@ -99,6 +102,10 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     bool public paused; // no new cases; entries, hearings, payouts and claims continue
     address public treasury;
     uint256 public platformOwed; // the platform's share, not yet withdrawn
+    // payments the token refused (a blocked address, say): kept here for the payee to pull, so no single payee can
+    // stop a docket or a settlement
+    mapping(address => uint256) public unpaid;
+    uint256 public unpaidTotal;
     IRewardsSink public rewardsSink; // none at launch
     uint16 public rewardsBps; // share of platformOwed routed to the sink on withdrawal (0 at launch)
     IRewardsSink public pendingSink;
@@ -138,7 +145,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         address holdToken; // holders only: the token checked when filing (0: open to everyone)
         uint16 maxBrief; // longest brief, in UTF-8 bytes
         uint256 minHold; // holders only: the balance of holdToken a brief's author must hold when filing
-        uint96 reserve; // the most a hearing may pay the jury, fixed at creation (params.maxOracleFee then)
+        uint96 reserve; // the most a hearing may pay the jury: params.maxOracleFee at creation (raiseReserve may lift it)
         uint64 stalledSince; // when the brief at the head of the docket first failed to open (0: not stalled)
     }
 
@@ -206,6 +213,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     event SinkChanged(address sink, uint16 bps);
     event SinkCancelled();
     event HolderTokenSet(address token);
+    event PaymentHeld(address indexed to, uint256 amount); // the token refused a payment: claimUnpaid() pulls it later
+    event UnpaidClaimed(address indexed to, uint256 amount);
+    event ReserveRaised(uint256 indexed caseId, uint256 reserve);
 
     // ---------------------------------------------------------------- errors
 
@@ -388,6 +398,27 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         imd.safeTransfer(msg.sender, total);
     }
 
+    /// @notice Pull a payment the token refused earlier (a pot, a refund): only to the payee, once the token lets it.
+    function claimUnpaid() external nonReentrant {
+        uint256 amount = unpaid[msg.sender];
+        if (amount == 0) revert NothingToClaim();
+        unpaid[msg.sender] = 0;
+        unpaidTotal -= amount;
+        imd.safeTransfer(msg.sender, amount);
+        emit UnpaidClaimed(msg.sender, amount);
+    }
+
+    /// @notice If IMD's price rose above what a case reserves for a hearing and the owner has since raised
+    ///         maxOracleFee, anyone may lift the case's reserve to it (up, never down, always below the case's fee),
+    ///         so entries can be heard again. Each hearing still pays IMD's actual price and splits the rest.
+    function raiseReserve(uint256 caseId) external nonReentrant {
+        Case storage c = cases[caseId];
+        uint256 r = params.maxOracleFee;
+        if (c.status != CaseStatus.Open || r <= c.reserve || r >= c.fee) revert BadParams();
+        c.reserve = uint96(r);
+        emit ReserveRaised(caseId, r);
+    }
+
     // ---------------------------------------------------------------- hearings
 
     /// @notice Open the next hearing if none is running (after a requester failure, say). Anyone may call it.
@@ -439,7 +470,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         b.status = BriefStatus.Mistrial;
         c.hearing = 0;
         uint256 back = uint256(c.fee) - b.oracleReserve;
-        imd.safeTransfer(b.author, back);
+        _pay(b.author, back);
         emit Verdict(briefId, caseId, BriefStatus.Mistrial, c.precedent, 0);
         emit MistrialRefund(briefId, caseId, back);
         _hearNext(caseId);
@@ -593,7 +624,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         b.status = BriefStatus.Unheard;
         uint256 back = c.fee; // never heard, so nothing was split: the whole entry fee goes back
         b.oracleReserve = 0;
-        imd.safeTransfer(b.author, back);
+        _pay(b.author, back);
         emit Unheard(briefId, caseId, back);
     }
 
@@ -673,7 +704,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         c.status = CaseStatus.Settled;
         c.winner = winner;
         c.pot = 0;
-        imd.safeTransfer(winner, prize);
+        _pay(winner, prize);
         emit CaseSettled(caseId, winner, c.precedent, prize);
         return true;
     }
@@ -699,6 +730,18 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         }
         imd.safeTransfer(treasury, amount - toRewards);
         emit PlatformWithdrawn(amount - toRewards, toRewards);
+    }
+
+    /// @dev Push a payment; if the token refuses it (the payee is blocked, say), keep it for claimUnpaid instead, so the
+    ///      docket and the settlement never depend on one payee.
+    function _pay(address to, uint256 amount) private {
+        (bool ok, bytes memory ret) = address(imd).call(abi.encodeCall(IERC20.transfer, (to, amount)));
+        if (ok && (ret.length == 0 ? address(imd).code.length != 0 : ret.length >= 32 && abi.decode(ret, (uint256)) == 1)) {
+            return;
+        }
+        unpaid[to] += amount;
+        unpaidTotal += amount;
+        emit PaymentHeld(to, amount);
     }
 
     /// @dev A requester that reverts, has no code or answers with anything but a uint256 is a failed quote (a stall),

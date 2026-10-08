@@ -271,66 +271,60 @@ contract LivenessAudit is Test {
     }
 
     // =====================================================================================================
-    // Push payout to a blacklisted/paused-for winner bricks the case forever (only if IMD can blacklist)
+    // FIXED (IMD swarm re-audit, finding 1): the live IMD token has a block list. A payment the token refuses is
+    // kept for the payee to pull (claimUnpaid), so no blocked address can stop a verdict, a mistrial or a payout.
     // =====================================================================================================
 
-    // KNOWN: push payouts; only matters if the IMD token can blacklist (it cannot today).
-    function test_Known_L_BlacklistedWinnerBricksTheLastVerdictAndMistrial() public {
+    function test_Fixed_BlockedWinnerNoLongerBricksTheLastVerdictOrMistrial() public {
         uint256 c = _case(1 days);
         uint256 a1 = _file(c, alice, B1);
         vm.warp(b.getCase(c).endsAt); // entries closed; a1 is the last hearing
         BlacklistERC20(address(imd)).setBlocked(alice, true);
-        (ImdOracle.AttestationV2 memory a, bytes memory sig) = _att(key, a1, true);
-        {
-            uint256 bid_ = b.briefOfRequest(a.requestId);
-            vm.expectRevert(bytes("blacklisted"));
-            b.fulfill(bid_, a, sig); // COOKED cannot land: settle pays alice inside fulfill
-        }
-        // a mistrial hands alice the rest of her fee: blocked as well, so only a DENIED answer can end the case
-        vm.warp(block.timestamp + 7 minutes);
+        uint256 snap = vm.snapshotState();
+        _judge(a1, true); // COOKED lands and the case settles; alice's pot is held for her
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+        assertEq(b.getCase(c).winner, alice);
+        uint256 held = b.unpaid(alice);
+        assertGt(held, SEED);
+        assertEq(b.unpaidTotal(), held);
+        vm.prank(alice);
         vm.expectRevert(bytes("blacklisted"));
-        b.mistrial(c);
+        b.claimUnpaid(); // still blocked: nothing moves
+        BlacklistERC20(address(imd)).setBlocked(alice, false);
+        uint256 before = imd.balanceOf(alice);
+        vm.prank(alice);
+        b.claimUnpaid();
+        assertEq(imd.balanceOf(alice), before + held);
+        assertEq(b.unpaidTotal(), 0);
+        vm.revertToState(snap);
+        vm.warp(block.timestamp + 7 minutes);
+        b.mistrial(c); // the refund is held, and the case settles to the opening brief
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+        assertEq(b.unpaid(alice), FEE - 0.5 ether);
     }
 
-    // KNOWN: as above, a blacklisted leader bricks the case (push payout inside fulfill/mistrial/settle).
-    function test_Known_L_BlacklistedLeaderBricksTheCaseForever() public {
+    function test_Fixed_BlockedLeaderNoLongerBricksTheCase() public {
         uint256 c = _case(1 days);
         uint256 a1 = _file(c, alice, B1);
         _judge(a1, true); // alice leads
         uint256 b1 = _file(c, bob, B2);
         vm.warp(b.getCase(c).endsAt);
         BlacklistERC20(address(imd)).setBlocked(alice, true);
-        (ImdOracle.AttestationV2 memory a, bytes memory sig) = _att(key, b1, false);
-        {
-            uint256 bid_ = b.briefOfRequest(a.requestId);
-            vm.expectRevert(bytes("blacklisted"));
-            b.fulfill(bid_, a, sig);
-        }
-        vm.warp(block.timestamp + 10 minutes);
-        vm.expectRevert(bytes("blacklisted"));
-        b.mistrial(c);
-        vm.warp(block.timestamp + 30 days);
-        vm.expectRevert(Briefs.WrongStatus.selector);
-        b.skipStalled(c);
-        vm.expectRevert(Briefs.TooEarly.selector);
-        b.settle(c); // hearing is stuck at b1 forever; whole pot locked
-        assertEq(b.getCase(c).hearing, b1);
+        _judge(b1, false); // DENIED: alice wins, her pot is held for her
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+        assertEq(b.getCase(c).winner, alice);
+        assertGt(b.unpaid(alice), 0);
     }
 
-    // KNOWN: the refund of an unheard brief is pushed too, so a blacklisted queued author blocks the verdict.
-    function test_Known_L_BlacklistedQueuedAuthorBlocksSkipOnPriceRise() public {
+    function test_Fixed_BlockedQueuedAuthorNoLongerBlocksTheVerdict() public {
         uint256 c = _case(1 days);
         uint256 a1 = _file(c, alice, B1);
-        _file(c, carol, B2);
+        uint256 c2 = _file(c, carol, B2);
         BlacklistERC20(address(imd)).setBlocked(carol, true);
-        requester.setFee(1 ether); // above the case's reserve: carol's whole fee must be returned on the next _hearNext
-        vm.warp(block.timestamp + 1 minutes);
-        (ImdOracle.AttestationV2 memory a, bytes memory sig) = _att(key, a1, true);
-        {
-            uint256 bid_ = b.briefOfRequest(a.requestId);
-            vm.expectRevert(bytes("blacklisted"));
-            b.fulfill(bid_, a, sig); // even alice's own verdict cannot land
-        }
+        requester.setFee(1 ether); // above the case's reserve: carol's whole fee comes back on the next _hearNext
+        _judge(a1, true); // alice's verdict lands; carol's refund is held for her
+        assertEq(uint8(b.getBrief(c2).status), uint8(Briefs.BriefStatus.Unheard));
+        assertEq(b.unpaid(carol), FEE);
     }
 
     // =====================================================================================================

@@ -342,7 +342,7 @@ contract OracleAuditTest is Test {
         text.check(bytes.concat("a", _utf8(0x2028), "b"), 1, 500, 500);
 
         // the edges of the blocked ranges stay usable
-        uint256[4] memory ok = [uint256(0xFDFF), 0xFE10, 0xE01F0, 0x27EC];
+        uint256[4] memory ok = [uint256(0xFDFF), 0xFE10, 0xE1000, 0x27EC];
         for (uint256 i; i < ok.length; i++) text.check(bytes.concat("a", _utf8(ok[i]), "b"), 1, 500, 500);
 
         // and such a brief never reaches a docket
