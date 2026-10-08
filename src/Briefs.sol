@@ -32,8 +32,9 @@ import {BriefsJury} from "./BriefsJury.sol";
 ///         receive up to half of it (MAX_REWARDS_BPS), set only after a public CONFIG_DELAY and only for fees
 ///         accrued after the change. Neither the owner nor the sink can touch pots or creator earnings.
 ///
-///         The owner tunes numbers within hard bounds (new cases and new hearings only), pauses new cases
-///         (entries, hearings and payouts keep running). Opening a case costs a flat caseFee, paid to the treasury.
+///         The owner tunes numbers within hard bounds (new cases only: a case fixes its split, jury, reserve,
+///         panel, answer window and brief length when it opens), pauses new cases (entries, hearings and payouts keep
+///         running). Opening a case costs a flat caseFee, paid to the treasury.
 ///
 ///         The owner can open holders-only cases (minHold > 0): only addresses holding at least that much of
 ///         holderToken may file briefs in them. Token and amount are fixed when the case opens.
@@ -201,7 +202,6 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     event ParamsSet(Params p);
     event TreasurySet(address treasury);
     event Paused(bool paused);
-    event CaseOracleMoved(uint256 indexed caseId, uint256 oracleId);
     event SinkProposed(address sink, uint16 bps, uint256 readyAt);
     event SinkChanged(address sink, uint16 bps);
     event SinkCancelled();
@@ -223,19 +223,19 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     error BadParams();
     error OutOfGas();
     error NotHolder();
+    error WrongOracle();
+    error OracleTooExpensive();
 
     // ---------------------------------------------------------------- constructor
 
     constructor(IERC20 imd_, BriefsText text_, BriefsJury jury_, address treasury_, Params memory p)
         Ownable(msg.sender)
     {
-        if (
-            address(imd_) == address(0) || address(text_) == address(0) || address(jury_) == address(0)
-                || treasury_ == address(0)
-        ) revert BadParams();
+        if (address(imd_) == address(0) || address(text_) == address(0) || address(jury_) == address(0)) revert BadParams();
         imd = imd_;
         text = text_;
         jury = jury_;
+        _checkTreasury(treasury_);
         treasury = treasury_;
         _setParams(p);
         jury_.bind(text_); // the jury serves this contract only
@@ -248,7 +248,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     }
 
     function setTreasury(address t) external onlyOwner {
-        if (t == address(0)) revert BadParams();
+        _checkTreasury(t);
         treasury = t;
         emit TreasurySet(t);
     }
@@ -267,20 +267,11 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         emit Paused(p);
     }
 
-    /// @notice A creator moves their case to the newest oracle setup, while nothing is waiting. Nobody else can.
-    function useLatestOracle(uint256 caseId) external {
-        Case storage c = cases[caseId];
-        if (msg.sender != c.creator) revert NotCreator();
-        // only before the first entry: players join a case on the jury it names, and that never changes under them
-        if (docketOf[caseId].length != 0) revert WrongStatus();
-        c.oracleId = uint32(jury.latest());
-        emit CaseOracleMoved(caseId, c.oracleId);
-    }
-
     /// @notice Plan where part of the platform's share goes later (e.g. a rewards contract). Takes effect after
     ///         CONFIG_DELAY via applySink(); bps ≤ MAX_REWARDS_BPS. (address(0), 0) plans to stop routing.
     function proposeSink(IRewardsSink sink, uint16 bps) external onlyOwner {
         if (bps > MAX_REWARDS_BPS || (address(sink) == address(0)) != (bps == 0)) revert BadParams();
+        if (bps != 0 && address(sink).code.length == 0) revert BadParams(); // a sink must be a contract
         pendingSink = sink;
         pendingRewardsBps = bps;
         sinkReadyAt = block.timestamp + CONFIG_DELAY;
@@ -325,6 +316,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint256 fee; // the entry fee in IMD, fixed for the case's life
         uint64 endsAt; // entries close at this unix time, within minDuration..maxDuration from now
         uint256 minHold; // 0: anyone may file. Otherwise (owner only) only holders of at least this much holderToken
+        uint32 oracleId; // the jury setup the creator saw (jury.latest()): the case is judged by it for life, or not opened
     }
 
     /// @notice Open a case. The creator's opening brief is the first precedent; the seed is the starting pot.
@@ -353,7 +345,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         text.check(bytes(words), MIN_BRIEF, c.maxBrief, c.maxBrief);
         if (!holds(caseId, msg.sender)) revert NotHolder();
 
-        // no oracle call here: filing never depends on the oracle (a hearing checks the price when it opens)
+        // filing never depends on the oracle working: a failing or silent requester never stops it (see below)
         uint256 fee = c.fee;
         uint96 reserve = c.reserve;
 
@@ -366,6 +358,13 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         b.oracleReserve = reserve;
         briefText[id] = words;
         docketOf[caseId].push(id);
+        // nothing being heard and the new brief within reach of this call's skips: if the jury's price is known and
+        // above the case's reserve (the same for every brief of the case), say so now instead of taking the fee and
+        // handing it back (an unknown price never stops a filing)
+        if (c.hearing == 0 && docketOf[caseId].length - c.head <= STEPS) {
+            (bool quoted, uint256 price) = _tryQuote(jury.get(c.oracleId).requester);
+            if (quoted && price > reserve) revert OracleTooExpensive();
+        }
 
         // the fee waits in escrow until the verdict: only then is it split, and an unheard brief gets it all back
         imd.safeTransferFrom(msg.sender, address(this), fee);
@@ -461,8 +460,13 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
             revert TooEarly();
         }
         // the oracle must be failing right now, in this very call: if a hearing can open, it opens instead
+        uint256 head = c.head;
         if (!_hearNext(caseId)) {
-            if (c.hearing != 0) return;
+            // a hearing opened, or briefs were already handed back because the jury got dearer: keep that progress
+            if (c.hearing != 0 || c.head != head) {
+                _maybeSettle(caseId);
+                return;
+            }
             revert WrongStatus();
         }
         _skip(caseId, c, ids[c.head]);
@@ -551,7 +555,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         Case storage c = cases[id];
         c.creator = msg.sender;
         c.createdAt = uint64(block.timestamp);
-        c.oracleId = uint32(jury.latest());
+        // the setup the creator agreed to, never one applied in the meantime; it never changes for this case
+        if (jury.latest() != x.oracleId) revert WrongOracle();
+        c.oracleId = x.oracleId;
         c.endsAt = endsAt;
         c.status = CaseStatus.Open;
         c.creatorBps = p.creatorBps;
@@ -676,7 +682,8 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint256 amount = platformOwed;
         if (amount == 0) return;
         platformOwed = 0;
-        uint256 toRewards = address(rewardsSink) == address(0) ? 0 : (amount * rewardsBps) / BPS;
+        // a sink without code (it self-destructed, say) counts as broken: calling it would revert outside the try
+        uint256 toRewards = address(rewardsSink).code.length == 0 ? 0 : (amount * rewardsBps) / BPS;
         if (toRewards != 0) {
             // the sink pulls its part inside notifyReward; whatever it does not take (it reverts, it is broken)
             // goes to the treasury, so a bad sink can never lock the platform's share or block its own replacement
@@ -694,13 +701,19 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         emit PlatformWithdrawn(amount - toRewards, toRewards);
     }
 
+    /// @dev A requester that reverts, has no code or answers with anything but a uint256 is a failed quote (a stall),
+    ///      never a revert of the caller: a low-level call, so even a malformed reply can't freeze a case.
     function _tryQuote(IImdRequester r) private view returns (bool, uint256) {
         if (gasleft() < QUOTE_GAS + QUOTE_GAS / 63 + RESERVE_GAS) revert OutOfGas();
-        try r.fee{gas: QUOTE_GAS}() returns (uint256 price) {
-            return (true, price);
-        } catch {
-            return (false, 0);
-        }
+        (bool ok, bytes memory ret) = address(r).staticcall{gas: QUOTE_GAS}(abi.encodeCall(IImdRequester.fee, ()));
+        if (!ok || ret.length < 32) return (false, 0);
+        return (true, abi.decode(ret, (uint256)));
+    }
+
+    /// @dev Never Briefs itself, its jury or the jury's requester: IMD sent there would sit behind no liability.
+    function _checkTreasury(address t) private view {
+        if (t == address(0) || t == address(this) || t == address(jury)) revert BadParams();
+        if (t == address(jury.get(jury.latest()).requester)) revert BadParams();
     }
 
     function _setParams(Params memory p) private {

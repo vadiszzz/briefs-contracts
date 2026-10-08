@@ -149,6 +149,7 @@ abstract contract AuditBase is Test {
     MockERC20 imd;
     MockRequester requester;
     Briefs b;
+    uint32 oid; // the setup new cases name (jury.latest())
     BriefsJury jury;
     uint256 key = 0xB21EF;
     bytes32 domain;
@@ -194,9 +195,9 @@ abstract contract AuditBase is Test {
         return BriefsJury.Oracle({signer: signer, requester: r, domain: domain, chainId: 1, hearingGas: 3_000_000});
     }
 
-    function _input(uint64 endsAt) internal pure returns (Briefs.CaseInput memory) {
+    function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid
         });
     }
 
@@ -247,6 +248,7 @@ abstract contract AuditBase is Test {
         jury.proposeOracle(_oracle(vm.addr(key), r));
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
+        oid = uint32(jury.latest()); // new cases must name the live setup
     }
 }
 
@@ -264,6 +266,7 @@ contract FundsTest is AuditBase {
         jury.proposeOracle(o);
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
+        oid = uint32(jury.latest()); // new cases must name the live setup
         uint256 c = _case();
 
         string memory leader = _repeat(unicode"🐉", 125); // 125 characters, 500 bytes: the longest legal brief
@@ -510,7 +513,7 @@ contract FundsHandler is Test {
         dur = bound(dur, 10 minutes, 3 days);
         Briefs.CaseInput memory x = Briefs.CaseInput({
             title: "Title", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 1,
-            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0
+            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0, oracleId: uint32(b.jury().latest())
         });
         vm.prank(a);
         caseIds.push(b.openCase(x));
@@ -579,8 +582,13 @@ contract FundsHandler is Test {
         try b.claimCreator(ids) {} catch {}
     }
 
+    bool public shareLocked; // withdrawPlatform failed while something was owed (a sink must never lock the share)
+
     function withdraw() external {
-        try b.withdrawPlatform() {} catch {}
+        bool owed = b.platformOwed() != 0;
+        try b.withdrawPlatform() {} catch {
+            if (owed) shareLocked = true;
+        }
     }
 
     function setPrice(uint256 p) external {
@@ -595,6 +603,63 @@ contract FundsHandler is Test {
     function warp(uint256 dt) external {
         vm.warp(block.timestamp + bound(dt, 1, 4 days));
     }
+
+    // ---- owner paths (this handler owns Briefs): none of them may move IMD the contract owes
+
+    MockERC20 public holderToken;
+
+    function setParams(uint256 creatorBps, uint256 platformBps, uint256 maxOracleFee, uint256 caseFee, uint256 maxBrief)
+        external
+    {
+        Briefs.Params memory p = Briefs.Params({
+            minSeed: 10 ether, minFee: 1 ether, maxOracleFee: bound(maxOracleFee, 0, 5 ether),
+            creatorBps: uint16(bound(creatorBps, 0, 3_000)), platformBps: uint16(bound(platformBps, 0, 3_000)),
+            panelSize: 11, quorum: 6, answerTimeout: 4 minutes, caseFee: bound(caseFee, 0, 1_000 ether),
+            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: uint16(bound(maxBrief, 100, 600))
+        });
+        try b.setParams(p) {} catch {}
+    }
+
+    /// any address, including the court itself, its jury and its requester (those must be refused)
+    function setTreasury(uint256 pick) external {
+        address[6] memory t =
+            [actors[0], actors[1], address(0xBEEF), address(b), address(b.jury()), address(requester)];
+        try b.setTreasury(t[pick % t.length]) {} catch {}
+    }
+
+    /// a rewards sink: honest, pulling double, re-entering, or with no code at all; applied after its delay
+    function setSink(uint256 mode, uint256 bps) external {
+        bps = bound(bps, 0, 5_000);
+        IRewardsSink sink;
+        if (bps != 0) {
+            GreedySink g = new GreedySink(b);
+            g.setMode(mode % 4); // not mode 4: a sink that hands IMD back is a donation, outside the accounting
+            sink = g;
+        }
+        try b.proposeSink(sink, uint16(bps)) {} catch { return; }
+        vm.warp(block.timestamp + 2 days);
+        try b.applySink() {} catch {}
+        if (bps != 0 && mode % 5 == 4) vm.etch(address(sink), ""); // the sink loses its code after the fact
+    }
+
+    /// a holders-only case (only the owner opens them); actors 0 and 1 hold the token, 2 and 3 don't
+    function openHoldersCase(uint256 seed, uint256 fee, uint256 dur, uint256 minHold) external {
+        if (address(holderToken) == address(0)) {
+            holderToken = new MockERC20("HOLD", "HOLD", address(this));
+            holderToken.transfer(actors[0], 100 ether);
+            holderToken.transfer(actors[1], 100 ether);
+            b.setHolderToken(IERC20(address(holderToken)));
+        }
+        Briefs.CaseInput memory x = Briefs.CaseInput({
+            title: "Holders", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 2,
+            seed: bound(seed, 10 ether, 1000 ether), fee: bound(fee, 1 ether, 50 ether),
+            endsAt: uint64(block.timestamp + bound(dur, 10 minutes, 3 days)), minHold: bound(minHold, 1, 100 ether),
+            oracleId: uint32(b.jury().latest())
+        });
+        try b.openCase(x) returns (uint256 c) {
+            caseIds.push(c);
+        } catch {}
+    }
 }
 
 contract FundsInvariantTest is StdInvariant, AuditBase {
@@ -604,6 +669,12 @@ contract FundsInvariantTest is StdInvariant, AuditBase {
         super.setUp();
         address[4] memory a = [creator, alice, bob, carol];
         h = new FundsHandler(b, imd, requester, digester, key, domain, a);
+        b.transferOwnership(address(h)); // the handler drives the owner paths too
+        vm.prank(address(h));
+        b.acceptOwnership();
+        imd.transfer(address(h), 1_000_000 ether);
+        vm.prank(address(h));
+        imd.approve(address(b), type(uint256).max);
         targetContract(address(h));
     }
 
@@ -631,6 +702,13 @@ contract FundsInvariantTest is StdInvariant, AuditBase {
     /// forge-config: default.invariant.depth = 200
     function invariant_BalanceEqualsLiabilities() public view {
         assertEq(imd.balanceOf(address(b)), _liabilities());
+    }
+
+    /// the platform's share can always be paid out, whatever sink is set
+    /// forge-config: default.invariant.runs = 64
+    /// forge-config: default.invariant.depth = 200
+    function invariant_PlatformShareNeverLocks() public view {
+        assertFalse(h.shareLocked());
     }
 
     /// settled cases hold no pot

@@ -88,7 +88,8 @@ contract HoldersTest is Test {
                 seed: 100 ether,
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + dur),
-                minHold: minHold
+                minHold: minHold,
+                oracleId: 0
             })
         );
     }
@@ -138,7 +139,8 @@ contract HoldersTest is Test {
                 seed: 100 ether,
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + 1 days),
-                minHold: MIN_HOLD
+                minHold: MIN_HOLD,
+                oracleId: 0
             })
         );
         assertEq(b.getCase(_open(MIN_HOLD, 1 days)).creator, address(this));

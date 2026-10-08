@@ -102,6 +102,7 @@ contract LivenessAudit is Test {
     IERC20 imd;
     MockRequester requester;
     Briefs b;
+    uint32 oid; // the setup new cases name (jury.latest())
     BriefsJury jury;
     uint256 key = 0xB21EF;
     bytes32 domain;
@@ -151,9 +152,9 @@ contract LivenessAudit is Test {
         return BriefsJury.Oracle({signer: signer, requester: r, domain: domain, chainId: 1, hearingGas: 3_000_000});
     }
 
-    function _input(uint64 endsAt) internal pure returns (Briefs.CaseInput memory) {
+    function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: "Dragon Jokes", task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0
+            title: "Dragon Jokes", task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid
         });
     }
 
@@ -234,8 +235,8 @@ contract LivenessAudit is Test {
 
     // =====================================================================================================
     // M-2 (FIXED): jury owner + case creator used to be able to re-wire a LIVE case (with players' money in it)
-    //      to a jury they control. useLatestOracle now works only before the first entry, so players always
-    //      join on the jury the case names, and it never changes under them.
+    //      to a jury they control. A case's setup is fixed when it opens (the creator names it) and
+    //      nothing can move it, so players always join on the jury the case names.
     // =====================================================================================================
 
     function test_Fixed_M2_CreatorCannotMoveACaseWithEntries() public {
@@ -246,10 +247,8 @@ contract LivenessAudit is Test {
         jury.proposeOracle(_oracle(vm.addr(evilKey), requester)); // owner: a signer it controls
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
-        vm.prank(creator);
-        vm.expectRevert(Briefs.WrongStatus.selector);
-        b.useLatestOracle(c);
-        assertEq(b.getCase(c).oracleId, 0);
+        oid = uint32(jury.latest()); // new cases must name the live setup
+        assertEq(b.getCase(c).oracleId, 0); // nothing can move a case to another setup
         // a forged answer for the next hearing is rejected: the case still checks the original signer
         uint256 y = _file(c, bob, B2);
         vm.warp(block.timestamp + 1 minutes);
@@ -259,10 +258,15 @@ contract LivenessAudit is Test {
             vm.expectRevert(BriefsJury.BadSignature.selector);
             b.fulfill(bid_, a, sig);
         }
-        // a fresh case with no entries yet may still opt in, before anyone pays
-        uint256 c2 = _case(1 days);
+        // a new case lands on the new setup only when its creator names it
+        Briefs.CaseInput memory x = _input(uint64(block.timestamp + 1 days));
+        x.oracleId = 0; // the setup it saw before the switch
         vm.prank(creator);
-        b.useLatestOracle(c2);
+        vm.expectRevert(Briefs.WrongOracle.selector);
+        b.openCase(x);
+        x.oracleId = 1;
+        vm.prank(creator);
+        uint256 c2 = b.openCase(x);
         assertEq(b.getCase(c2).oracleId, 1);
     }
 
@@ -439,6 +443,7 @@ contract LivenessAudit is Test {
         jury.proposeOracle(_oracle(vm.addr(key), probe));
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
+        oid = uint32(jury.latest()); // new cases must name the live setup
         string memory big = _big(unicode"😀", 125); // 500 bytes, the longest brief
         Briefs.CaseInput memory x = _input(uint64(block.timestamp + 1 days));
         x.task = _big(unicode"😀", 60); // 240 bytes
@@ -477,6 +482,7 @@ contract LivenessAudit is Test {
         jury.proposeOracle(o);
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
+        oid = uint32(jury.latest()); // new cases must name the live setup
         uint256 c = _case(60 days);
         uint256 a1 = _file(c, alice, B1); // short texts: heard fine
         assertEq(b.getCase(c).hearing, a1);
@@ -510,6 +516,7 @@ contract LivenessAudit is Test {
         jury.proposeOracle(_oracle(vm.addr(key), r));
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
+        oid = uint32(jury.latest()); // new cases must name the live setup
         uint256 c = _case(1 days);
         string memory big = _big(unicode"😀", 125);
         uint256 a1 = _file(c, alice, big);

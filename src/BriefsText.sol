@@ -108,7 +108,7 @@ contract BriefsText {
     /// @dev Text must reach the IMD server unchanged inside a JSON string: strict UTF-8, no control
     ///      characters, no `"` or `\`, no quote marks that could close the «» around it, no bidi or
     ///      zero-width characters, no whitespace at either end (JS trim() would strip it) and no two whitespace
-    ///      characters in a row (a server that tidies spaces would hash a different question).
+    ///      characters in a row (a server that tidies spaces would hash a different question), and no << or >>.
     ///      minLen and maxLen count characters (Unicode code points); maxBytes caps the UTF-8 bytes.
     function check(bytes calldata t, uint256 minLen, uint256 maxLen, uint256 maxBytes) external pure {
         uint256 len = t.length;
@@ -116,6 +116,7 @@ contract BriefsText {
         uint256 chars;
         uint256 first;
         uint256 last;
+        uint256 seen; // the last character that is not a combining mark or a thin, wide or no-break space
         uint256 i;
         while (i < len) {
             uint256 c = uint8(t[i]);
@@ -149,7 +150,11 @@ contract BriefsText {
             ) revert BadText();
             if (i == 0) first = cp;
             else if (_isSpace(cp) && _isSpace(last)) revert BadText();
+            // << or >> would read as the «» the question quotes with
+            // (also with a combining mark or a thin space between the two, which renders much the same)
+            else if ((cp == 0x3c || cp == 0x3e) && cp == seen) revert BadText();
             last = cp;
+            if (!_isFiller(cp)) seen = cp;
             i += n;
             ++chars;
         }
@@ -170,7 +175,15 @@ contract BriefsText {
             // look-alikes of the «» the question quotes with
             || cp == 0x226a || cp == 0x226b || cp == 0x27ea || cp == 0x27eb || cp == 0x2aa1 || cp == 0x2aa2
             || cp == 0x276e || cp == 0x276f || cp == 0x27e8 || cp == 0x27e9 || cp == 0x2329 || cp == 0x232a
-            || cp == 0xfe3d || cp == 0xfe3e;
+            || cp == 0xfe3d || cp == 0xfe3e || cp == 0x2770 || cp == 0x2771 || cp == 0x276c || cp == 0x276d
+            || cp == 0x29fc || cp == 0x29fd || cp == 0x22d8 || cp == 0x22d9 || cp == 0xfe64 || cp == 0xfe65 || cp == 0xff1c
+            || cp == 0xff1e || cp == 0x02c2 || cp == 0x02c3;
+    }
+
+    /// combining marks and every space but the plain one: barely visible between two brackets
+    function _isFiller(uint256 cp) private pure returns (bool) {
+        return (cp >= 0x300 && cp <= 0x36f) || (cp >= 0x1ab0 && cp <= 0x1aff) || (cp >= 0x1dc0 && cp <= 0x1dff)
+            || (cp >= 0x20d0 && cp <= 0x20ff) || (cp >= 0xfe20 && cp <= 0xfe2f) || (cp != 0x20 && _isSpace(cp));
     }
 
     function _isSpace(uint256 cp) private pure returns (bool) {

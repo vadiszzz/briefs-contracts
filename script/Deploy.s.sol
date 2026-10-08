@@ -32,7 +32,7 @@ import {IIntake} from "../src/interfaces/IIntake.sol";
 ///                    adapter to it. Nothing changes until NEW_OWNER calls acceptOwnership() on each of the three
 /// Holders-only cases need a holder token: setHolderToken(token) after deploy (none at launch).
 /// Every number below can be changed later with setParams (within the contract's bounds); new numbers apply to
-/// new cases (the split) and new hearings (panel, timeout).
+/// new cases only: a running case keeps its split, jury reserve, panel, answer window and brief length.
 contract Deploy is Script {
     address constant IMD_ETHEREUM = 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7;
     address constant DEFAULT_ATTESTER = 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982;

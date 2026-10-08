@@ -25,7 +25,7 @@ The on-chain court behind [briefs.fun](https://briefs.fun), live on Robinhood Ch
 
 ## A case
 
-1. **Open** (`openCase`): a title, a task, a standard (how two answers are compared), an opening brief (the first leader), a seed pot in IMD, a fixed entry fee and a deadline. Opening costs a flat `caseFee` paid to the treasury, separate from the seed.
+1. **Open** (`openCase`): the jury setup it expects (`oracleId`, must be `jury.latest()`), a title, a task, a standard (how two answers are compared), an opening brief (the first leader), a seed pot in IMD, a fixed entry fee and a deadline. Opening costs a flat `caseFee` paid to the treasury, separate from the seed.
 2. **File** (`fileBrief`): pay the fee and join a public FIFO docket. The fee waits in escrow.
 3. **Hearings**, one at a time, in docket order: each asks IMD whether the brief is better than the leader standing at that moment, judged by the standard (a tie or a reworded copy keeps the leader). The request names `BriefsJury` as its EIP-712 consumer and as the Intake callback, so IMD signs the answer for that contract only.
 4. **Verdicts** (`fulfill`, by anyone): the jury rebuilds the hearing's `questionHash` on chain, requires that IMD's Intake delivered exactly this attestation for the hearing's request, checks the answer window, the panel and the signature.
@@ -39,17 +39,17 @@ On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per 
 
 ## Owner
 
-`setParams` (within hard bounds, new cases only), `setPaused` (new cases only; entries, hearings, payouts and claims never pause), `setTreasury`, `setHolderToken`, oracle setups behind a 7-day delay, a rewards sink for at most half of the platform share behind a 2-day delay. The owner can't touch pots, escrow or creator earnings, or change a running case.
+`setParams` (within hard bounds, new cases only), `setPaused` (new cases only; entries, hearings, payouts and claims never pause), `setTreasury`, `setHolderToken`, oracle setups behind a 7-day delay (a running case keeps the setup it opened with), a rewards sink for at most half of the platform share behind a 2-day delay. The owner can't touch pots, escrow or creator earnings, or change a running case.
 
 ## Build and test
 
 ```sh
 forge build
-forge test          # 119 tests, including PoCs and regressions in test/audit and a solvency invariant
+forge test          # 128 tests, including PoCs and regressions in test/audit and a solvency invariant
 ```
 
 Foundry with solc 0.8.30 (optimizer, 200 runs). `lib/` holds OpenZeppelin Contracts v5.4.0 and forge-std.
 
 ## Reviews
 
-`docs/audit-internal-2026-10.md`: our own reviews (two rounds, every finding with a Foundry PoC in `test/audit/`). Not an external audit.
+`docs/audit-internal-2026-10.md`: our own two reviews (every finding with a Foundry PoC in `test/audit/`), then the IMD swarm audit ([report](https://explorer.imd.fun/jobs/21511e3a-2ed8-4813-b82c-70dcb61af7d4): 1 Medium, 4 Low, 6 Info, all addressed; tests `test_Swarm*`).

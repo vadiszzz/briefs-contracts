@@ -16,19 +16,28 @@ contract MockRequester is IImdRequester {
     bool public greedy; // takes more than it quoted
     bool public broken; // reverts every request
     bool public brokenFee; // fee() reverts
+    bool public shortFee; // fee() returns one byte instead of a uint256
+    bool public shortSource; // answerSource() returns one byte instead of an address
 
     constructor(IERC20 imd_, uint256 fee__) {
         imd = imd_;
         fee_ = fee__;
     }
 
-    function answerSource() external pure returns (address) {
+    function answerSource() external view returns (address) {
+        if (shortSource) assembly { return(0, 1) }
         return address(0);
     }
 
     function fee() external view returns (uint256) {
         require(!brokenFee, "fee down");
+        if (shortFee) assembly { return(0, 1) }
         return fee_;
+    }
+
+    function setShort(bool fee__, bool source) external {
+        shortFee = fee__;
+        shortSource = source;
     }
 
     function setFee(uint256 f) external {

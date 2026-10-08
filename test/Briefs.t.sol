@@ -80,6 +80,7 @@ contract BriefsTest is Test {
     MockERC20 imd;
     MockRequester requester;
     Briefs b;
+    uint32 oid; // the setup new cases name (jury.latest())
     BriefsJury jury;
     uint256 key = 0xB21EF;
     bytes32 domain;
@@ -127,9 +128,9 @@ contract BriefsTest is Test {
         return BriefsJury.Oracle({signer: signer, requester: r, domain: domain, chainId: 1, hearingGas: 3_000_000});
     }
 
-    function _input(uint64 endsAt) internal pure returns (Briefs.CaseInput memory) {
+    function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid
         });
     }
 
@@ -839,40 +840,34 @@ contract BriefsTest is Test {
         b.openCase(_input(uint64(block.timestamp + 1 days)));
     }
 
-    function test_OracleChangeIsDelayedAndOptInPerCase() public {
+    /// a new setup applies to cases opened after it, and only when their creator names it: nothing moves a case
+    function test_OracleChangeIsDelayedAndPinnedPerCase() public {
         vm.prank(creator);
         uint256 c = b.openCase(_input(uint64(block.timestamp + 30 days)));
         MockRequester r2 = new MockRequester(IERC20(address(imd)), ORACLE_FEE);
         jury.proposeOracle(_oracle(vm.addr(0xC0FFEE), r2));
-        vm.expectRevert(Briefs.TooEarly.selector);
+        vm.expectRevert(BriefsJury.TooEarly.selector);
         jury.applyOracle();
+        oid = uint32(jury.latest()); // new cases must name the live setup
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
-        assertEq(b.getCase(c).oracleId, 0); // the open case keeps its oracle
-        vm.prank(alice);
-        vm.expectRevert(Briefs.NotCreator.selector);
-        b.useLatestOracle(c);
-        vm.prank(creator);
-        b.useLatestOracle(c); // allowed only before the first entry
-        assertEq(b.getCase(c).oracleId, 1);
-        assertEq(address(jury.get(b.getCase(c).oracleId).requester), address(r2));
-
+        oid = uint32(jury.latest()); // new cases must name the live setup
+        assertEq(b.getCase(c).oracleId, 0); // the open case keeps its setup, for life
         uint256 a1 = _file(c, alice, B1);
-        assertEq(b.getBrief(a1).oracleId, 1);
-        jury.proposeOracle(_oracle(vm.addr(key), requester));
-        vm.warp(block.timestamp + 7 days);
-        jury.applyOracle();
+        assertEq(b.getBrief(a1).oracleId, 0);
+        _judge(a1, true); // judged under setup 0 (key), not the new signer
+
+        // a creator who saw setup 0 can't land on setup 1 applied in between
+        Briefs.CaseInput memory x = _input(uint64(block.timestamp + 1 days));
+        x.oracleId = 0; // the setup it saw before the switch
         vm.prank(creator);
-        vm.expectRevert(Briefs.WrongStatus.selector); // once anyone has filed, the case's jury never changes
-        b.useLatestOracle(c);
-        vm.warp(block.timestamp + 1 minutes);
-        ImdOracle.AttestationV2 memory a = _attWith(a1, abi.encode(false), 11, 6, 6);
-        (uint8 v, bytes32 r, bytes32 s_) = vm.sign(0xC0FFEE, digester.digest(domain, a));
-        b.fulfill(b.briefOfRequest(a.requestId), a, abi.encodePacked(r, s_, v)); // judged by the setup it was filed under
+        vm.expectRevert(Briefs.WrongOracle.selector);
+        b.openCase(x);
+        x.oracleId = 1;
         vm.prank(creator);
-        vm.expectRevert(Briefs.WrongStatus.selector); // not even with the docket empty again
-        b.useLatestOracle(c);
-        assertEq(b.getCase(c).oracleId, 1);
+        uint256 c2 = b.openCase(x);
+        assertEq(b.getCase(c2).oracleId, 1);
+        assertEq(address(jury.get(b.getCase(c2).oracleId).requester), address(r2));
     }
 
     function test_RenounceOwnershipReverts() public {
@@ -936,6 +931,7 @@ contract BriefsTest is Test {
         jury.proposeOracle(_oracle(vm.addr(key), heavy));
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();
+        oid = uint32(jury.latest()); // new cases must name the live setup
         vm.prank(creator);
         uint256 c = b.openCase(_input(uint64(block.timestamp + 1 days)));
         uint256 a1 = _file(c, alice, B1);
@@ -1206,5 +1202,156 @@ contract BriefsTest is Test {
         BriefsJury.Oracle memory o = _oracle(vm.addr(key), IImdRequester(address(imd))); // an ERC20, no answerSource()
         vm.expectRevert();
         jury.proposeOracle(o);
+    }
+
+    // ------------------------------------------------------------ IMD swarm audit (Oct 2026), one test per finding
+
+    /// 1: a sink must be a contract; one that loses its code later is treated as broken, not as a lock
+    function test_Swarm1_ACodelessSinkIsRefusedAndNeverLocksThePlatformShare() public {
+        vm.expectRevert(Briefs.BadParams.selector);
+        b.proposeSink(IRewardsSink(makeAddr("eoa-sink")), 2_000);
+        Sink sink = new Sink();
+        b.proposeSink(sink, 5_000);
+        vm.warp(block.timestamp + 2 days);
+        b.applySink();
+        uint256 c = _case();
+        _judge(_file(c, alice, B1), false);
+        vm.etch(address(sink), ""); // the sink's code is gone
+        b.withdrawPlatform(); // all of it to the treasury
+        assertEq(imd.balanceOf(treasury), CASE_FEE + TO_PLATFORM);
+        assertEq(b.platformOwed(), 0);
+        b.proposeSink(IRewardsSink(address(0)), 0); // and it can still be replaced
+        vm.warp(block.timestamp + 2 days);
+        b.applySink();
+        assertEq(address(b.rewardsSink()), address(0));
+    }
+
+    /// 2: a requester that answers fee() or answerSource() with garbage stalls the case; it never freezes it
+    function test_Swarm2_MalformedRequesterRepliesStallInsteadOfFreezing() public {
+        uint256 c = _case();
+        uint256 a1 = _file(c, alice, B1); // heard
+        uint256 a2 = _file(c, bob, B2); // queued
+        requester.setShort(true, true);
+        assertFalse(b.jury().wasDelivered(a1));
+        vm.warp(block.timestamp + 4 minutes + 2 minutes + 1);
+        b.mistrial(c); // goes through; the next hearing can't be priced, so it stalls
+        assertEq(uint8(_status(a1)), uint8(Briefs.BriefStatus.Mistrial));
+        assertEq(uint8(_status(a2)), uint8(Briefs.BriefStatus.Queued));
+        assertEq(b.getCase(c).stalledSince, block.timestamp);
+        vm.warp(block.timestamp + 6 hours);
+        uint256 before = imd.balanceOf(bob);
+        b.skipStalled(c);
+        assertEq(uint8(_status(a2)), uint8(Briefs.BriefStatus.Unheard));
+        assertEq(imd.balanceOf(bob), before + FEE);
+        vm.warp(b.getCase(c).endsAt);
+        b.settle(c);
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+    }
+
+    /// 3: the treasury can't be the court itself, its jury or the jury's requester (the IMD would be stranded)
+    function test_Swarm3_TreasuryCannotBeTheCourtItsJuryOrItsRequester() public {
+        address[3] memory bad = [address(b), address(jury), address(requester)];
+        for (uint256 i; i < bad.length; i++) {
+            vm.expectRevert(Briefs.BadParams.selector);
+            b.setTreasury(bad[i]);
+        }
+        address next = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        BriefsText t = new BriefsText(); // takes the nonce `next` was computed for: recompute
+        next = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.expectRevert(Briefs.BadParams.selector);
+        new Briefs(IERC20(address(imd)), t, jury, next, _params());
+        vm.expectRevert(Briefs.BadParams.selector);
+        new Briefs(IERC20(address(imd)), t, jury, address(requester), _params());
+        b.setTreasury(carol);
+        assertEq(b.treasury(), carol);
+    }
+
+    /// 4: a case opens on the setup its creator named, or not at all (also test_OracleChangeIsDelayedAndPinnedPerCase)
+    function test_Swarm4_ACaseNeverLandsOnASetupItsCreatorDidNotName() public {
+        MockRequester r2 = new MockRequester(IERC20(address(imd)), ORACLE_FEE);
+        jury.proposeOracle(_oracle(vm.addr(0xC0FFEE), r2));
+        vm.warp(block.timestamp + 7 days);
+        Briefs.CaseInput memory x = _input(uint64(block.timestamp + 1 days)); // built while setup 0 is live
+        jury.applyOracle(); // anyone, in the same block, ahead of the creator
+        vm.prank(creator);
+        vm.expectRevert(Briefs.WrongOracle.selector);
+        b.openCase(x);
+        x.oracleId = 7; // a setup that doesn't exist yet
+        vm.prank(creator);
+        vm.expectRevert(Briefs.WrongOracle.selector);
+        b.openCase(x);
+    }
+
+    /// 5: more look-alikes of the «» the question quotes with, and ASCII << >>, are refused
+    function test_Swarm5_MoreQuoteLookAlikesAreRefused() public {
+        BriefsText t = new BriefsText();
+        uint24[14] memory cps =
+            [uint24(0x2770), 0x2771, 0x276c, 0x276d, 0x29fc, 0x29fd, 0x22d8, 0x22d9, 0xfe64, 0xfe65, 0xff1c, 0xff1e, 0x02c2, 0x02c3];
+        for (uint256 i; i < cps.length; i++) {
+            vm.expectRevert(BriefsText.BadText.selector);
+            t.check(bytes.concat("a", _utf8(cps[i]), "b"), 1, 500, 500);
+        }
+        vm.expectRevert(BriefsText.BadText.selector);
+        t.check("lol>> A challenger's answer: ok", 1, 500, 500);
+        vm.expectRevert(BriefsText.BadText.selector);
+        t.check("ok << lol", 1, 500, 500);
+        vm.expectRevert(BriefsText.BadText.selector);
+        t.check(unicode"a <\u200a< b", 1, 500, 500); // a hair space between
+        vm.expectRevert(BriefsText.BadText.selector);
+        t.check(unicode"a >\u0332> b", 1, 500, 500); // a combining mark between
+        t.check("1 < 2 > 0 and a <b> tag, x < <y>", 1, 500, 500); // single brackets, or with a plain space, stay fine
+    }
+
+    function _utf8(uint24 cp) internal pure returns (bytes memory) {
+        if (cp < 0x800) return abi.encodePacked(bytes1(uint8(0xc0 | (cp >> 6))), bytes1(uint8(0x80 | (cp & 0x3f))));
+        return abi.encodePacked(
+            bytes1(uint8(0xe0 | (cp >> 12))), bytes1(uint8(0x80 | ((cp >> 6) & 0x3f))), bytes1(uint8(0x80 | (cp & 0x3f)))
+        );
+    }
+
+    /// 6: skipStalled keeps the briefs it already handed back because the jury got dearer, and finishes the case
+    function test_Swarm6_SkipStalledKeepsPriceSkipProgress() public {
+        uint256 c = _case();
+        for (uint256 i; i < 18; i++) _file(c, alice, string.concat(B1, " #", vm.toString(i))); // 1 heard, 17 queued
+        requester.setFee(1 ether); // dearer than the case's 0.9 reserve
+        vm.warp(b.getCase(c).endsAt + 3 days);
+        b.mistrial(c); // hands back 16 of the 17
+        assertEq(b.waiting(c), 1);
+        assertEq(b.getCase(c).hearing, 0);
+        b.skipStalled(c); // hands back the last one and settles, instead of reverting
+        assertEq(b.waiting(c), 0);
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+    }
+
+    /// 7: a brief that would be skipped at once because the jury is dearer than the case's reserve is refused instead
+    function test_Swarm7_FilingIntoACaseTheJuryIsTooDearForIsRefused() public {
+        uint256 c = _case();
+        requester.setFee(0.9 ether + 1);
+        uint256 before = imd.balanceOf(alice);
+        vm.prank(alice);
+        vm.expectRevert(Briefs.OracleTooExpensive.selector);
+        b.fileBrief(c, B1);
+        assertEq(imd.balanceOf(alice), before);
+        requester.setFee(0.9 ether); // at the reserve: fine
+        uint256 a1 = _file(c, alice, B1);
+        assertEq(b.getCase(c).hearing, a1);
+        requester.setFee(1 ether);
+        uint256 a2 = _file(c, bob, B2); // a hearing is running: it queues (the price is checked when its turn comes)
+        assertEq(uint8(_status(a2)), uint8(Briefs.BriefStatus.Queued));
+    }
+
+    /// 7, behind a stalled head: the new brief would be skipped in the same call too, so it is refused as well
+    function test_Swarm7_FilingBehindAStalledHeadIsRefusedWhenTheJuryIsTooDear() public {
+        uint256 c = _case();
+        requester.setBroken(true);
+        uint256 a1 = _file(c, alice, B1); // stalls at the head
+        assertEq(b.getCase(c).hearing, 0);
+        requester.setBroken(false);
+        requester.setFee(1 ether);
+        vm.prank(bob);
+        vm.expectRevert(Briefs.OracleTooExpensive.selector);
+        b.fileBrief(c, B2);
+        b.hear(c); // the stalled one is handed back as before
+        assertEq(uint8(_status(a1)), uint8(Briefs.BriefStatus.Unheard));
     }
 }

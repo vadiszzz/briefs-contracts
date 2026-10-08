@@ -199,7 +199,11 @@ contract BriefsJury is Ownable2Step {
     ///         longer before a mistrial, so the keeper can land it).
     function wasDelivered(uint256 briefId) external view returns (bool) {
         IBriefsCourt.BriefView memory b = court.getBrief(briefId);
-        address source = oracles[b.oracleId].requester.answerSource();
+        // a requester that can't name its source must never stop a mistrial: treat it as nothing delivered
+        (bool ok, bytes memory ret) =
+            address(oracles[b.oracleId].requester).staticcall{gas: 100_000}(abi.encodeCall(IImdRequester.answerSource, ()));
+        if (!ok || ret.length < 32) return false;
+        address source = address(uint160(abi.decode(ret, (uint256))));
         return source != address(0) && delivered[source][b.requestId] != bytes32(0);
     }
 

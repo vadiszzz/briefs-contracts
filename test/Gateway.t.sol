@@ -87,7 +87,8 @@ contract GatewayTest is Test {
                 seed: 100 ether,
                 fee: 2 ether,
                 endsAt: uint64(block.timestamp + 1 days),
-                minHold: 0
+                minHold: 0,
+                oracleId: 0
             })
         );
     }
