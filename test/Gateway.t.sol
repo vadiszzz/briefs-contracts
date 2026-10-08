@@ -358,6 +358,42 @@ contract GatewayTest is Test {
         assertEq(b.getCase(c).precedent, id);
     }
 
+    /// only an answer that could land earns the long grace: a bad signature or one expiring too soon does not
+    function test_OnlyALandableDeliveryHoldsTheMistrial() public {
+        uint256 c = _case();
+        uint256 id = _file(c, alice, "My brief");
+        vm.warp(block.timestamp + 1 minutes);
+        (ImdOracle.AttestationV2 memory a, bytes memory sig) = _answer(id, true, 0x70);
+        sig[10] = sig[10] ^ 0x01; // someone else's signature
+        assertTrue(_complete(id, a, sig));
+        assertFalse(b.jury().wasDelivered(id));
+        uint256 id2;
+        {
+            vm.warp(b.getBrief(id).heardAt + 4 minutes + 2 minutes + 1);
+            b.mistrial(c); // the usual grace
+            id2 = _file(c, bob, "My second brief");
+        }
+        (a,) = _answer(id2, true, 0x71);
+        a.expiresAt = uint64(b.getBrief(id2).heardAt + 4 minutes + 1 hours); // gone before the 6 h grace ends
+        (uint8 v, bytes32 r, bytes32 s_) = vm.sign(key, dg.digest(ImdOracle.domainSeparatorV("2", block.chainid, address(b.jury())), a));
+        assertTrue(_complete(id2, a, abi.encodePacked(r, s_, v)));
+        assertFalse(b.jury().wasDelivered(id2));
+        assertEq(b.jury().DELIVERED_GRACE(), b.DELIVERED_GRACE());
+    }
+
+    /// the Intake gives the callback 200k gas: a landable answer for the longest texts is recorded well within it
+    function test_TheCallbackFitsTheIntakesGas() public {
+        uint256 c = _case();
+        string memory longest;
+        for (uint256 i; i < 125; i++) longest = string.concat(longest, unicode"жж");
+        uint256 id = _file(c, alice, longest); // 500 bytes
+        vm.warp(block.timestamp + 1 minutes);
+        (ImdOracle.AttestationV2 memory a, bytes memory sig) = _answer(id, true, 0x72);
+        intake.setCallbackGas(110_000); // well under the 200k the live Intake gives
+        assertTrue(_complete(id, a, sig));
+        assertTrue(b.jury().wasDelivered(id));
+    }
+
     /// IMD's clock may run up to 2 minutes behind the chain's: the answer the Intake delivered still lands
     function test_ASmallClockSkewIsTolerated() public {
         uint256 c = _case();

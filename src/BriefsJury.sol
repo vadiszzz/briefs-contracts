@@ -85,6 +85,11 @@ contract BriefsJury is Ownable2Step {
     error AlreadyBound();
     error NotHearing();
     uint256 public constant CLOCK_SKEW = 2 minutes;
+    /// @dev the most a hearing may get: the site and the keeper send 7M gas on calls that may open one, and the longest
+    ///      filing needs about 1.9M on top of hearingGas
+    uint256 public constant MAX_HEARING_GAS = 4_000_000;
+    /// @dev same as Briefs.DELIVERED_GRACE: a delivered answer only holds a mistrial off if it stays valid that long
+    uint256 public constant DELIVERED_GRACE = 6 hours;
 
     error AnsweredBeforeAsked();
     error Expired();
@@ -196,14 +201,18 @@ contract BriefsJury is Ownable2Step {
     /// @notice IMD's Intake calls this with each answer (the callback every request names). It only records which
     ///         answer the caller delivered for which request: anyone may call it, but verdict() only looks at what
     ///         the hearing's own setup source (the Intake) delivered.
-    function onImdAnswer(bytes32 requestId, ImdOracle.AttestationV2 calldata att, bytes calldata) external {
+    function onImdAnswer(bytes32 requestId, ImdOracle.AttestationV2 calldata att, bytes calldata signature) external {
         delivered[msg.sender][requestId] = keccak256(abi.encode(att));
-        if (_landable(requestId, att)) landable[msg.sender][requestId] = true;
+        if (_landable(requestId, att, signature)) landable[msg.sender][requestId] = true;
         emit AnswerDelivered(msg.sender, requestId);
     }
 
     /// @dev Never reverts (a failed callback would lose IMD's delivery): anything unexpected is simply not landable.
-    function _landable(bytes32 requestId, ImdOracle.AttestationV2 calldata att) private view returns (bool) {
+    function _landable(bytes32 requestId, ImdOracle.AttestationV2 calldata att, bytes calldata signature)
+        private
+        view
+        returns (bool)
+    {
         (bool ok, bytes memory ret) = address(court).staticcall{gas: 30_000}(abi.encodeCall(IBriefsCourt.briefOfRequest, (requestId)));
         if (!ok || ret.length < 32) return false;
         uint256 briefId = abi.decode(ret, (uint256));
@@ -212,10 +221,19 @@ contract BriefsJury is Ownable2Step {
         if (!ok || ret.length < 12 * 32) return false;
         IBriefsCourt.BriefView memory b = abi.decode(ret, (IBriefsCourt.BriefView));
         (bool isBool,) = ImdOracle.decodeBool(att.answer);
-        return b.requestId == requestId && isBool && att.answerType == ImdOracle.ANSWER_TYPE_BOOL
-            && att.chainId == oracles[b.oracleId].chainId && att.panelSize == b.panelSize && att.quorum == b.quorum
-            && att.agreed >= att.quorum && uint256(att.issuedAt) + CLOCK_SKEW >= b.heardAt
-            && att.issuedAt <= uint256(b.heardAt) + b.answerTimeout;
+        if (
+            b.requestId != requestId || !isBool || att.answerType != ImdOracle.ANSWER_TYPE_BOOL
+                || att.panelSize != b.panelSize || att.quorum != b.quorum || att.agreed < att.quorum
+                || uint256(att.issuedAt) + CLOCK_SKEW < b.heardAt || att.issuedAt > uint256(b.heardAt) + b.answerTimeout
+                || att.expiresAt < uint256(b.heardAt) + b.answerTimeout + DELIVERED_GRACE
+        ) return false;
+        // the attester's signature (chain, bool and EIP-712 checks; about 10k gas). The questionHash is not rebuilt
+        // here: that costs more than the Intake's callback gas allows, and IMD hashes the same text we send
+        try this.verify{gas: 60_000}(b.oracleId, address(this), att, signature) returns (bool) {
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     /// @notice Whether IMD's Intake has delivered an answer for the running hearing of `briefId` that can land (Briefs
@@ -296,7 +314,7 @@ contract BriefsJury is Ownable2Step {
     function _check(Oracle memory o) private view {
         if (
             o.signer == address(0) || address(o.requester) == address(0) || o.chainId == 0 || o.hearingGas < 200_000
-                || o.hearingGas > 10_000_000
+                || o.hearingGas > MAX_HEARING_GAS
         ) revert BadOracle();
         // verdict() asks the requester for its answer source on every answer: it must answer (zero is fine).
         // An on-chain source (IMD's Intake) signs for the callback's domain, so a pinned domain can't go with it.

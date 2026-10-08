@@ -27,7 +27,7 @@ import {IIntake} from "../src/interfaces/IIntake.sol";
 ///   IMD_DOMAIN_CONTRACT  with IMD_PINNED_DOMAIN=1: verifyingContract of that domain, default 0x0
 ///   IMD_DOMAIN_CHAIN     with IMD_PINNED_DOMAIN=1: chainId of that domain, default IMD_CHAIN_ID
 ///   TREASURY         receives the platform's share and the case-opening fees; default: the deployer
-///   HEARING_GAS      gas each hearing gets for opening; default 3,000,000 (about 265k used on the Intake)
+///   HEARING_GAS      gas each hearing gets for opening; default 3,000,000 (about 265k used on the Intake), at most 4,000,000
 ///   NEW_OWNER        optional, e.g. a Safe: the script starts the two-step handover of Briefs, BriefsJury and the
 ///                    adapter to it. Nothing changes until NEW_OWNER calls acceptOwnership() on each of the three
 /// Holders-only cases need a holder token: setHolderToken(token) after deploy (none at launch).

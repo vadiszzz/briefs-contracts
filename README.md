@@ -45,11 +45,11 @@ On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per 
 
 ```sh
 forge build
-forge test          # 135 tests, including PoCs and regressions in test/audit and a solvency invariant
+forge test          # 139 tests, including PoCs and regressions in test/audit and a solvency invariant
 ```
 
 Foundry with solc 0.8.30 (optimizer, 200 runs). `lib/` holds OpenZeppelin Contracts v5.4.0 and forge-std.
 
 ## Reviews
 
-`docs/audit-internal-2026-10.md`: our own two reviews (every finding with a Foundry PoC in `test/audit/`), then two IMD swarm audits ([first](https://explorer.imd.fun/jobs/21511e3a-2ed8-4813-b82c-70dcb61af7d4): 1 Medium, 4 Low, 6 Info; [re-audit](https://explorer.imd.fun/jobs/8e03ebfb-e610-4f68-8fe5-71ab8251a8d2): 1 Medium, 4 Low, 3 Info; all addressed, tests `test_Swarm*` and `test_Reaudit_*`).
+`docs/audit-internal-2026-10.md`: our own two reviews (every finding with a Foundry PoC in `test/audit/`), then two IMD swarm audits ([first](https://explorer.imd.fun/jobs/21511e3a-2ed8-4813-b82c-70dcb61af7d4): 1 Medium, 4 Low, 6 Info; [re-audit](https://explorer.imd.fun/jobs/8e03ebfb-e610-4f68-8fe5-71ab8251a8d2): 1 Medium, 4 Low, 3 Info; all addressed, tests `test_Swarm*` and `test_Reaudit_*`), then our own five-auditor review before the redeploy (`test_Own_*`).

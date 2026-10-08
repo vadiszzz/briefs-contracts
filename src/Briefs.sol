@@ -318,9 +318,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
 
     struct CaseInput {
         string title; // display name, 3–48 characters; never sent to the jury
-        string task; // what players should write, 10–240 bytes
-        string standard; // how two answers are compared ("The funnier brief wins."), 5–160 bytes
-        string opening; // the creator's own answer, 1–maxBrief bytes: the first precedent
+        string task; // what players should write, at least 10 characters and at most 240 bytes
+        string standard; // how two answers are compared ("The funnier brief wins."), at least 5 characters, at most 160 bytes
+        string opening; // the creator's own answer, at least 1 character, at most maxBrief bytes: the first precedent
         uint8 avatar; // the face the site shows for the case (any of 256; the site falls back for unknown ones)
         uint256 seed; // the starting pot in IMD; it all goes to the winner
         uint256 fee; // the entry fee in IMD, fixed for the case's life
@@ -500,6 +500,11 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
             }
             revert WrongStatus();
         }
+        // the head was handed back for its price and the next brief failed in this same call: it gets its own wait
+        if (c.head != head && block.timestamp < uint256(c.endsAt) + STALL_GRACE) {
+            _maybeSettle(caseId);
+            return;
+        }
         _skip(caseId, c, ids[c.head]);
         _maybeSettle(caseId);
     }
@@ -640,8 +645,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
             Brief storage b = briefs[briefId];
             (bool quoted, uint256 price) = _tryQuote(o.requester);
             if (!quoted) return _stalled(c, caseId, briefId);
-            if (price > b.oracleReserve) {
-                _skip(caseId, c, briefId); // the oracle got dearer than this brief reserved: hand the fee back
+            // against the case's reserve (it only goes up, see raiseReserve), so a raise reaches briefs already queued
+            if (price > c.reserve) {
+                _skip(caseId, c, briefId); // the oracle got dearer than the case reserves: hand the fee back
                 continue;
             }
             // the question is built out here; hearingGas covers openHearing as a whole (the requester and the

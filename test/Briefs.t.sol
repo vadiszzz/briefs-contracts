@@ -1398,7 +1398,7 @@ contract BriefsTest is Test {
     }
 
     /// R4: the text rules look characters up by range (plain ASCII takes a short path), so a full-length check stays
-    ///     cheap, and the longest brief of any script opens its hearing within the 6M the site and keeper send
+    ///     cheap, and the longest brief of any script opens its hearing within 6M (the site and keeper send 7M)
     function test_Reaudit_R4_TextRulesAreCheapAndTheLongestBriefFitsTheGasFloor() public {
         BriefsText t = new BriefsText();
         bytes memory x = bytes(_repeat("a", 600));
@@ -1450,5 +1450,32 @@ contract BriefsTest is Test {
             t.check(bytes.concat("a", _utf8(cps[i]), "b"), 1, 500, 500);
         }
         t.check(bytes.concat("a", _utf8(0x1f409), _utf8(0xfdcf), _utf8(0xfdf0), "b"), 1, 500, 500); // around them: fine
+    }
+
+    // ------------------------------------------------------------ own audit before the redeploy (Oct 2026)
+
+    /// a raised reserve reaches briefs already in the queue: they are heard, not handed back
+    function test_Own_ARaisedReserveReachesQueuedBriefs() public {
+        uint256 c = _case();
+        uint256 a1 = _file(c, alice, B1); // heard
+        uint256 b1 = _file(c, bob, B2); // queued with the 0.9 reserve
+        requester.setFee(0.95 ether);
+        Briefs.Params memory p = _params();
+        p.maxOracleFee = 0.99 ether;
+        b.setParams(p);
+        b.raiseReserve(c);
+        _judge(a1, true);
+        assertEq(b.getCase(c).hearing, b1); // heard at 0.95, not skipped
+        assertEq(b.getBrief(b1).oracleReserve, 0.95 ether);
+    }
+
+    /// a hearing may get at most 4M gas (the site and the keeper send 7M on calls that may open one)
+    function test_Own_HearingGasIsCappedForTheGasTheSiteSends() public {
+        BriefsJury.Oracle memory o = _oracle(vm.addr(key), requester);
+        o.hearingGas = 4_000_001;
+        vm.expectRevert(BriefsJury.BadOracle.selector);
+        jury.proposeOracle(o);
+        o.hearingGas = 4_000_000;
+        jury.proposeOracle(o);
     }
 }
