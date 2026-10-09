@@ -2,14 +2,14 @@
 
 The on-chain court behind [briefs.fun](https://briefs.fun), live on Robinhood Chain (chain id 4663). Players pay IMD to file short answers ("briefs") to a task; each brief is judged against the current leader by the IdentityMD (IMD) oracle swarm; the last leader standing takes the whole pot.
 
-## Deployed (Robinhood Chain, 8 Oct 2026, from block 83504137)
+## Deployed (Robinhood Chain, 9 Oct 2026, from block 83945523)
 
 | Contract | Address |
 |---|---|
-| `Briefs` | `0x85737d04bde718f42f90e31564540408cbbe6e4b` |
-| `BriefsJury` | `0x265c541aa5c5f202e1e3024570cb7d8b278ca691` |
-| `BriefsText` | `0x244b19349e5bb32338960353bb6c3a05f4157fa4` |
-| `ImdGatewayRequester` | `0xbaee00b30d6f585218e257d84c70cf4181229592` |
+| `Briefs` | `0x61bdfe5d291a98afda244b537c8f74e32a9beba3` |
+| `BriefsJury` | `0xf75a871ea1cc09e55ff87e9c468b436a56bb93f2` |
+| `BriefsText` | `0x15f61d8842847bebcda6999f9a9ec8072372a441` |
+| `ImdGatewayRequester` | `0xaf3a708404b8e331d69162c0c41c3694a764e416` |
 | IMD's Intake (IMD's contract) | `0x1397434cd35e8a9c8ac312a61d3a285eb31dea56` |
 | IMD token | `0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127` |
 
