@@ -130,11 +130,24 @@ every paying call, and per-player books rebuilt from brief statuses) held over 2
 
 | # | Severity | Issue | Fix |
 |---|---|---|---|
-| 1 | Low | `raiseReserve` did not reach briefs already queued: each kept the reserve copied at filing, so after a raise they were still handed back unheard | `_hearNext` compares IMD's price with the case's reserve, which only goes up. *Test: `test_Own_ARaisedReserveReachesQueuedBriefs`* |
+| 1 | Low | `raiseReserve` did not reach briefs already queued: each kept the reserve copied at filing, so after a raise they were still handed back unheard | First changed to compare with the case's reserve; reverted after the sixth review (a queued author must never pay more than they reserved when filing). A raise now applies to briefs filed after it |
 | 2 | Low | `skipStalled` could skip the next brief at its very first failure when the head was handed back for its price in the same call | Gone with fix 1 (one quote per call, one reserve per case); a guard also returns before skipping when the head moved in that call before `endsAt + STALL_GRACE` |
 | 3 | Info | A setup could give a hearing up to 10M gas, more than the gas the site and keeper send leaves room for | `hearingGas` is capped at 4M; the site and the keeper send 7M (the longest filing needs about 4.9M, plus the L1 data cost on Robinhood Chain). *Test: `test_Own_HearingGasIsCappedForTheGasTheSiteSends`* |
 | 4 | Info | `landable` didn't check the signature or `expiresAt`, so a delivered answer that could never land still held the docket 6 h | `_landable` also requires `expiresAt` to outlast the 6 h grace and checks the attester's signature (about 10k gas; the whole callback stays under 110k of the Intake's 200k). The questionHash is not rebuilt there (about 157k gas); IMD hashes the text we send, matched live and against a JS canonical serializer. *Tests: `test_OnlyALandableDeliveryHoldsTheMistrial`, `test_TheCallbackFitsTheIntakesGas`* |
 | 5 | Info | The site checked minimum lengths in bytes, the contract in characters ("Шутка?" passed the site, then failed on chain) | The site counts minimums in characters too |
 | 6 | Info | Text that NFC normalization changes was accepted; a server that normalizes would hash a different question | The site sends NFC (normalized before and after its clean-up) and refuses lone surrogates |
 | 7 | Low | A treasury on IMD's block list stops new cases and the platform payout | Accepted: running cases are unaffected and `setTreasury` fixes it in one transaction |
+
+## Sixth review: the third IMD swarm audit (October 2026)
+
+[Job 715e3900](https://explorer.imd.fun/jobs/715e3900-cecb-406e-ba02-6e58d5806d98), commit `7944a9d`: 3 Low, 3 Info, no Medium or above. Suite: 142 Foundry tests; the five self-audit suites re-run green on the result.
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 1 | Low | After `skipStalled` handed the head back, the next brief's stall clock stayed at zero until someone called `hear()` | `skipStalled` starts the next brief's wait at once (the oracle was just seen failing). *Test: `test_Own_SkipStalledStartsTheNextBriefsWait`* |
+| 2 | Low | `raiseReserve` let a brief already queued pay the jury more than the reserve it filed under (up to its whole fee) | A queued brief never pays more than it reserved; above that it is handed back with its whole fee. A raise applies to briefs filed after it. *Test: `test_Own_ARaiseNeverChargesAQueuedBriefMoreThanItReserved`* |
+| 3 | Low | Script-specific combining marks (Cyrillic titlo, Arabic fathatan, Devanagari virama, kana voiced mark, musical marks…) between two `<` or `>` passed the `<<`/`>>` rule | Only an ASCII character separates two `<` or `>`: anything non-ASCII between them is refused (the site does the same). *Test: `test_Own_NoMarkOfAnyScriptBetweenAngleBrackets`* |
+| 4 | Info | The treasury could be the IMD token or the text contract | Refused too. *Test: `test_Own_TreasuryCannotBeTheTokenOrTheText`* |
+| 5 | Info | A text made only of combining marks passes the minimum length | Accepted: no funds or JSON impact; the author pays for a brief the jury sees as empty |
+| 6 | Info | An unused local in `_hearNext` | Used again by fix 2 |
 

@@ -1454,8 +1454,8 @@ contract BriefsTest is Test {
 
     // ------------------------------------------------------------ own audit before the redeploy (Oct 2026)
 
-    /// a raised reserve reaches briefs already in the queue: they are heard, not handed back
-    function test_Own_ARaisedReserveReachesQueuedBriefs() public {
+    /// a raise applies to briefs filed after it: one already queued never pays the jury more than it reserved
+    function test_Own_ARaiseNeverChargesAQueuedBriefMoreThanItReserved() public {
         uint256 c = _case();
         uint256 a1 = _file(c, alice, B1); // heard
         uint256 b1 = _file(c, bob, B2); // queued with the 0.9 reserve
@@ -1464,9 +1464,58 @@ contract BriefsTest is Test {
         p.maxOracleFee = 0.99 ether;
         b.setParams(p);
         b.raiseReserve(c);
+        uint256 before = imd.balanceOf(bob);
         _judge(a1, true);
-        assertEq(b.getCase(c).hearing, b1); // heard at 0.95, not skipped
-        assertEq(b.getBrief(b1).oracleReserve, 0.95 ether);
+        assertEq(uint8(_status(b1)), uint8(Briefs.BriefStatus.Unheard)); // handed back, whole fee
+        assertEq(imd.balanceOf(bob), before + FEE);
+        uint256 c1 = _file(c, carol, "A new brief, filed after the raise"); // reserves 0.99: heard at 0.95
+        assertEq(b.getCase(c).hearing, c1);
+        assertEq(b.getBrief(c1).oracleReserve, 0.95 ether);
+    }
+
+    /// IMD swarm audit 3, finding 1: after skipStalled hands the head back, the next brief's wait starts at once
+    function test_Own_SkipStalledStartsTheNextBriefsWait() public {
+        uint256 c = _case();
+        requester.setBroken(true); // the oracle is down
+        uint256 t0 = block.timestamp;
+        uint256 a1 = _file(c, alice, B1);
+        uint256 b1 = _file(c, bob, B2);
+        vm.warp(t0 + 6 hours);
+        b.skipStalled(c);
+        assertEq(uint8(_status(a1)), uint8(Briefs.BriefStatus.Unheard));
+        assertEq(b.getCase(c).stalledSince, t0 + 6 hours);
+        vm.warp(t0 + 12 hours - 1);
+        vm.expectRevert(Briefs.TooEarly.selector);
+        b.skipStalled(c);
+        vm.warp(t0 + 12 hours);
+        b.skipStalled(c);
+        assertEq(uint8(_status(b1)), uint8(Briefs.BriefStatus.Unheard));
+    }
+
+    /// IMD swarm audit 3, finding 3: << or >> with any non-ASCII between them (a mark of any script) is refused
+    function test_Own_NoMarkOfAnyScriptBetweenAngleBrackets() public {
+        BriefsText t = new BriefsText();
+        bytes[13] memory marks = [
+            bytes(hex"d283"), hex"d288", hex"d6b0", hex"d98b", hex"e0a58d", hex"e0b8b1", hex"e0b8b4", hex"e0bdb1",
+            hex"e38299", hex"ea99b0", hex"f09d85a5", hex"f09d85a7", hex"cc81"
+        ];
+        for (uint256 i; i < marks.length; i++) {
+            vm.expectRevert(BriefsText.BadText.selector);
+            t.check(bytes.concat("a<", marks[i], "<b"), 1, 500, 500);
+            vm.expectRevert(BriefsText.BadText.selector);
+            t.check(bytes.concat("a>", marks[i], marks[i], ">b"), 1, 500, 500);
+        }
+        t.check(bytes.concat("a<", hex"d283", "x<b"), 1, 500, 500); // an ASCII letter between: fine
+        t.check("x < <y>", 1, 500, 500);
+    }
+
+    /// IMD swarm audit 3, finding 4: the treasury can't be the IMD token or the text contract either
+    function test_Own_TreasuryCannotBeTheTokenOrTheText() public {
+        vm.expectRevert(Briefs.BadParams.selector);
+        b.setTreasury(address(imd));
+        address text = address(b.text());
+        vm.expectRevert(Briefs.BadParams.selector);
+        b.setTreasury(text);
     }
 
     /// a hearing may get at most 4M gas (the site and the keeper send 7M on calls that may open one)

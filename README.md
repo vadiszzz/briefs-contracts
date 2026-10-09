@@ -35,7 +35,7 @@ The on-chain court behind [briefs.fun](https://briefs.fun), live on Robinhood Ch
 
 ## Money
 
-On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per case by its reserve) splits 80% pot, 15% creator, 5% platform (settable within bounds for new cases). Creator earnings are claimed with `claimCreator`; the platform share is paid to the treasury by `withdrawPlatform`. A brief that is never heard (the jury got dearer than the case's reserve, or its hearing kept failing) gets its whole fee back. The pot never pays the jury. If the token refuses a payment (the IMD token on Robinhood Chain has a block list), Briefs keeps it for the payee (`unpaid`, `claimUnpaid`), so no payee can stop a case. If IMD's price rises past a case's reserve, the owner can raise `maxOracleFee` and anyone can lift a running case to it (`raiseReserve`, never down, always below the fee). The contract's IMD balance equals open pots + creator earnings + the platform share + escrowed fees + held payments, to the wei (tested as an invariant).
+On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per case by its reserve) splits 80% pot, 15% creator, 5% platform (settable within bounds for new cases). Creator earnings are claimed with `claimCreator`; the platform share is paid to the treasury by `withdrawPlatform`. A brief that is never heard (the jury got dearer than the case's reserve, or its hearing kept failing) gets its whole fee back. The pot never pays the jury. If the token refuses a payment (the IMD token on Robinhood Chain has a block list), Briefs keeps it for the payee (`unpaid`, `claimUnpaid`), so no payee can stop a case. If IMD's price rises past a case's reserve, the owner can raise `maxOracleFee` and anyone can lift a running case to it (`raiseReserve`, never down, always below the fee) for briefs filed after the raise; a brief already queued never pays the jury more than it reserved. The contract's IMD balance equals open pots + creator earnings + the platform share + escrowed fees + held payments, to the wei (tested as an invariant).
 
 ## Owner
 
@@ -45,11 +45,11 @@ On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per 
 
 ```sh
 forge build
-forge test          # 139 tests, including PoCs and regressions in test/audit and a solvency invariant
+forge test          # 142 tests, including PoCs and regressions in test/audit and a solvency invariant
 ```
 
 Foundry with solc 0.8.30 (optimizer, 200 runs). `lib/` holds OpenZeppelin Contracts v5.4.0 and forge-std.
 
 ## Reviews
 
-`docs/audit-internal-2026-10.md`: our own two reviews (every finding with a Foundry PoC in `test/audit/`), then two IMD swarm audits ([first](https://explorer.imd.fun/jobs/21511e3a-2ed8-4813-b82c-70dcb61af7d4): 1 Medium, 4 Low, 6 Info; [re-audit](https://explorer.imd.fun/jobs/8e03ebfb-e610-4f68-8fe5-71ab8251a8d2): 1 Medium, 4 Low, 3 Info; all addressed, tests `test_Swarm*` and `test_Reaudit_*`), then our own five-auditor review before the redeploy (`test_Own_*`).
+`docs/audit-internal-2026-10.md`: our own two reviews (every finding with a Foundry PoC in `test/audit/`), then two IMD swarm audits ([first](https://explorer.imd.fun/jobs/21511e3a-2ed8-4813-b82c-70dcb61af7d4): 1 Medium, 4 Low, 6 Info; [re-audit](https://explorer.imd.fun/jobs/8e03ebfb-e610-4f68-8fe5-71ab8251a8d2): 1 Medium, 4 Low, 3 Info; all addressed, tests `test_Swarm*` and `test_Reaudit_*`), then our own five-auditor review before the redeploy (`test_Own_*`) and a third IMD swarm audit ([job 715e3900](https://explorer.imd.fun/jobs/715e3900-cecb-406e-ba02-6e58d5806d98): 3 Low, 3 Info, all addressed).

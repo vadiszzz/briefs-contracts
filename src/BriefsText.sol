@@ -116,7 +116,7 @@ contract BriefsText {
         if (len < minLen || len > maxBytes || len > maxLen * 4) revert BadText(); // a character takes 1 to 4 bytes
         uint256 chars;
         uint256 last;
-        uint256 seen; // the last character that is not a combining mark or a thin, wide or no-break space
+        uint256 seen; // the last ASCII character: << or >> with only non-ASCII between them still reads as « or »
         uint256 i;
         while (i < len) {
             uint256 c;
@@ -131,8 +131,8 @@ contract BriefsText {
                 } else if (c == 0x20 && _isSpace(last)) {
                     revert BadText();
                 } else if ((c == 0x3c || c == 0x3e) && c == seen) {
-                    // << or >> would read as the «» the question quotes with (also with a combining mark or a thin
-                    // space between the two, which renders much the same)
+                    // << or >> would read as the «» the question quotes with (also with only non-ASCII between the
+                    // two: a combining mark or a thin space renders much the same)
                     revert BadText();
                 }
                 last = c;
@@ -175,8 +175,7 @@ contract BriefsText {
             } else if (_isSpace(cp) && _isSpace(last)) {
                 revert BadText();
             }
-            last = cp;
-            if (!_isFiller(cp)) seen = cp;
+            last = cp; // (non-ASCII never updates `seen`: no mark, space or symbol of any script may sit between << or >>)
             i += n;
             ++chars;
         }
@@ -213,12 +212,6 @@ contract BriefsText {
         }
         return (cp & 0xfffe) == 0xfffe || (cp >= 0x1bca0 && cp <= 0x1bca3) || (cp >= 0x1d173 && cp <= 0x1d17a)
             || (cp >= 0xe0000 && cp <= 0xe0fff) || cp >= 0xf0000;
-    }
-
-    /// combining marks and every space but the plain one: barely visible between two brackets
-    function _isFiller(uint256 cp) private pure returns (bool) {
-        return (cp >= 0x300 && cp <= 0x36f) || (cp >= 0x1ab0 && cp <= 0x1aff) || (cp >= 0x1dc0 && cp <= 0x1dff)
-            || (cp >= 0x20d0 && cp <= 0x20ff) || (cp >= 0xfe20 && cp <= 0xfe2f) || (cp != 0x20 && _isSpace(cp));
     }
 
     function _isSpace(uint256 cp) private pure returns (bool) {

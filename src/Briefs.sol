@@ -369,8 +369,8 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         briefText[id] = words;
         docketOf[caseId].push(id);
         // nothing being heard and the new brief within reach of this call's skips: if the jury's price is known and
-        // above the case's reserve (the same for every brief of the case), say so now instead of taking the fee and
-        // handing it back (an unknown price never stops a filing)
+        // above what this brief reserves, say so now instead of taking the fee and handing it back (an unknown price
+        // never stops a filing)
         if (c.hearing == 0 && docketOf[caseId].length - c.head <= STEPS) {
             (bool quoted, uint256 price) = _tryQuote(jury.get(c.oracleId).requester);
             if (quoted && price > reserve) revert OracleTooExpensive();
@@ -410,7 +410,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
 
     /// @notice If IMD's price rose above what a case reserves for a hearing and the owner has since raised
     ///         maxOracleFee, anyone may lift the case's reserve to it (up, never down, always below the case's fee),
-    ///         so entries can be heard again. Each hearing still pays IMD's actual price and splits the rest.
+    ///         so new entries can be heard again. It applies to briefs filed after the raise: a brief already queued
+    ///         never pays the jury more than it reserved when filed (above that it is handed back with its whole fee).
+    ///         Each hearing pays IMD's actual price and splits the rest.
     function raiseReserve(uint256 caseId) external nonReentrant {
         Case storage c = cases[caseId];
         uint256 r = params.maxOracleFee;
@@ -506,6 +508,8 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
             return;
         }
         _skip(caseId, c, ids[c.head]);
+        // the oracle was just seen failing: the next brief's wait starts now, not at some later hear()
+        if (c.head < ids.length) c.stalledSince = uint64(block.timestamp);
         _maybeSettle(caseId);
     }
 
@@ -645,9 +649,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
             Brief storage b = briefs[briefId];
             (bool quoted, uint256 price) = _tryQuote(o.requester);
             if (!quoted) return _stalled(c, caseId, briefId);
-            // against the case's reserve (it only goes up, see raiseReserve), so a raise reaches briefs already queued
-            if (price > c.reserve) {
-                _skip(caseId, c, briefId); // the oracle got dearer than the case reserves: hand the fee back
+            // never more than the brief reserved when it was filed (a later raiseReserve applies to later briefs)
+            if (price > b.oracleReserve) {
+                _skip(caseId, c, briefId); // the oracle got dearer than this brief reserved: hand the fee back
                 continue;
             }
             // the question is built out here; hearingGas covers openHearing as a whole (the requester and the
@@ -759,9 +763,12 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         return (true, abi.decode(ret, (uint256)));
     }
 
-    /// @dev Never Briefs itself, its jury or the jury's requester: IMD sent there would sit behind no liability.
+    /// @dev Never Briefs itself, its jury, the jury's requester, the IMD token or the text contract: IMD sent there would
+    ///      sit behind no liability.
     function _checkTreasury(address t) private view {
-        if (t == address(0) || t == address(this) || t == address(jury)) revert BadParams();
+        if (t == address(0) || t == address(this) || t == address(jury) || t == address(imd) || t == address(text)) {
+            revert BadParams();
+        }
         if (t == address(jury.get(jury.latest()).requester)) revert BadParams();
     }
 
