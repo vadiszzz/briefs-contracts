@@ -136,10 +136,13 @@ contract BriefsTest is Test {
     uint32 inOvertime;
     uint8 inLang;
     uint16 inMax;
+    uint256 inCaseFee = CASE_FEE;
+    uint16 inCreatorBps = 1_500;
+    uint16 inPlatformBps = 500;
 
     function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: inReign, finalCap: inCap, overtime: inOvertime, lang: inLang, maxBrief: inMax
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: inReign, finalCap: inCap, overtime: inOvertime, lang: inLang, maxBrief: inMax, caseFee: inCaseFee, creatorBps: inCreatorBps, platformBps: inPlatformBps
         });
     }
 
@@ -1480,6 +1483,12 @@ contract BriefsTest is Test {
         inOvertime = 10 minutes;
     }
 
+    /// files at `t`: time as the leader counts from when a brief was filed
+    function _fileAt(uint256 c, address who, string memory words, uint256 t) internal returns (uint256) {
+        vm.warp(t);
+        return _file(c, who, words);
+    }
+
     /// the verdict on `briefId` lands at `t`
     function _verdictAt(uint256 briefId, bool better, uint256 t) internal {
         vm.warp(t);
@@ -1494,11 +1503,11 @@ contract BriefsTest is Test {
         _reignParams();
         uint256 t0 = block.timestamp;
         uint256 c = _case();
-        uint256 a1 = _file(c, alice, B1);
+        uint256 a1 = _fileAt(c, alice, B1, t0 + 6 hours);
         _verdictAt(a1, true, t0 + 6 hours); // alice takes the lead
-        uint256 b1 = _file(c, bob, B2);
+        uint256 b1 = _fileAt(c, bob, B2, t0 + 12 hours);
         _verdictAt(b1, true, t0 + 12 hours); // bob takes it from her
-        uint256 c1 = _file(c, carol, "A third brief");
+        uint256 c1 = _fileAt(c, carol, "A third brief", t0 + 20 hours);
         _verdictAt(c1, false, t0 + 20 hours); // denied: bob keeps leading
         vm.warp(t0 + 1 days);
         uint256 pot = b.getCase(c).pot;
@@ -1545,18 +1554,18 @@ contract BriefsTest is Test {
         _reignParams();
         uint256 c = _case();
         uint256 end0 = b.getCase(c).endsAt;
-        uint256 a1 = _file(c, alice, B1);
+        uint256 a1 = _fileAt(c, alice, B1, end0 - 11 minutes);
         _verdictAt(a1, true, end0 - 11 minutes); // not in the last 10 minutes: no overtime
         assertEq(b.getCase(c).endsAt, end0);
-        uint256 b1 = _file(c, bob, B2);
+        uint256 b1 = _fileAt(c, bob, B2, end0 - 4 minutes);
         _verdictAt(b1, true, end0 - 4 minutes);
         assertEq(b.getCase(c).endsAt, end0 + 6 minutes); // now + 10 min
         uint256 t = end0 - 4 minutes;
         for (uint256 i; i < 20; i++) {
             // past the original deadline, entries are still open
             address who = i % 2 == 0 ? carol : alice;
-            uint256 id = _file(c, who, string.concat("Overtime brief ", vm.toString(i)));
             t = b.getCase(c).endsAt - 1;
+            uint256 id = _fileAt(c, who, string.concat("Overtime brief ", vm.toString(i)), t);
             _verdictAt(id, true, t);
             assertEq(b.getCase(c).endsAt, t + 10 minutes);
         }
@@ -1576,22 +1585,42 @@ contract BriefsTest is Test {
         assertEq(k.reignPool, (SEED + 22 * TO_POT) * 6_000 * 11 minutes / (10_000 * (end0 - k.createdAt)));
     }
 
-    /// a brief heard after the deadline can still take the lead and the final share, but earns no time and no overtime
-    function test_Reign_ALeaderAfterTheDeadlineTakesTheFinalShareButNoTime() public {
+    /// a brief filed before the deadline but heard after it can still take the lead and the final share; its time
+    /// counts from its filing to the deadline, and it adds no overtime
+    function test_Reign_ALeaderHeardAfterTheDeadlineTakesTheFinalShareAndTimeFromItsFiling() public {
         _reignParams();
         uint256 t0 = block.timestamp;
         uint256 c = _case();
-        uint256 a1 = _file(c, alice, B1);
+        uint256 a1 = _fileAt(c, alice, B1, t0 + 1 hours);
         _verdictAt(a1, true, t0 + 1 hours);
-        uint256 b1 = _file(c, bob, B2); // its hearing opens now, its verdict lands after the deadline
         uint256 end = b.getCase(c).endsAt;
+        uint256 b1 = _fileAt(c, bob, B2, end - 1 hours); // its verdict lands after the deadline
         _verdictAt(b1, true, end + 1 minutes);
         assertEq(b.getCase(c).endsAt, end); // no overtime after the deadline
         assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled)); // the docket is clear: settled
         Briefs.Case memory k = b.getCase(c);
         assertEq(k.winner, bob);
-        assertEq(b.reignOf(c, alice), end - (t0 + 1 hours)); // alice led until the deadline
-        assertEq(b.reignOf(c, bob), 0);
+        assertEq(b.reignOf(c, alice), end - 1 hours - (t0 + 1 hours)); // alice led until bob filed
+        assertEq(b.reignOf(c, bob), 1 hours); // bob from his filing to the deadline
+        assertEq(k.reignTotal, end - (t0 + 1 hours));
+    }
+
+    /// a leader can't keep the lead longer by stuffing the queue: a challenger's time starts when it filed, however
+    /// long it waited behind the leader's own briefs
+    function test_Reign_StuffingTheQueueBuysTheLeaderNothing() public {
+        _reignParams();
+        uint256 t0 = block.timestamp;
+        uint256 c = _case();
+        _verdictAt(_fileAt(c, alice, B1, t0 + 1 hours), true, t0 + 1 hours);
+        vm.warp(t0 + 2 hours);
+        uint256 a2 = _file(c, alice, "Alice blocks the queue"); // heard first
+        uint256 b1 = _file(c, bob, B2); // waits behind it
+        _verdictAt(a2, false, t0 + 8 hours); // a slow hearing
+        _verdictAt(b1, true, t0 + 8 hours);
+        vm.warp(t0 + 1 days);
+        b.settle(c);
+        assertEq(b.reignOf(c, alice), 1 hours); // 1 h to 2 h, not until bob's verdict
+        assertEq(b.reignOf(c, bob), 22 hours);
     }
 
     /// leading twice adds up
@@ -1599,9 +1628,9 @@ contract BriefsTest is Test {
         _reignParams();
         uint256 t0 = block.timestamp;
         uint256 c = _case();
-        _verdictAt(_file(c, alice, B1), true, t0 + 1 hours);
-        _verdictAt(_file(c, bob, B2), true, t0 + 3 hours);
-        _verdictAt(_file(c, alice, "Alice strikes back"), true, t0 + 4 hours);
+        _verdictAt(_fileAt(c, alice, B1, t0 + 1 hours), true, t0 + 1 hours);
+        _verdictAt(_fileAt(c, bob, B2, t0 + 3 hours), true, t0 + 3 hours);
+        _verdictAt(_fileAt(c, alice, "Alice strikes back", t0 + 4 hours), true, t0 + 4 hours);
         vm.warp(t0 + 1 days);
         b.settle(c);
         assertEq(b.reignOf(c, alice), 2 hours + 20 hours);
@@ -1752,11 +1781,11 @@ contract BriefsTest is Test {
         uint256 c = _case();
         uint256 end0 = b.getCase(c).endsAt;
         assertEq(b.getCase(c).finalEnd, end0 + 15 minutes);
-        _verdictAt(_file(c, alice, B1), true, end0 - 1 minutes);
+        _verdictAt(_fileAt(c, alice, B1, end0 - 1 minutes), true, end0 - 1 minutes);
         assertEq(b.getCase(c).endsAt, end0 + 9 minutes);
-        _verdictAt(_file(c, bob, B2), true, end0 + 8 minutes);
+        _verdictAt(_fileAt(c, bob, B2, end0 + 8 minutes), true, end0 + 8 minutes);
         assertEq(b.getCase(c).endsAt, end0 + 15 minutes); // not +18: capped
-        _verdictAt(_file(c, carol, "A third brief"), true, end0 + 14 minutes);
+        _verdictAt(_fileAt(c, carol, "A third brief", end0 + 14 minutes), true, end0 + 14 minutes);
         assertEq(b.getCase(c).endsAt, end0 + 15 minutes); // stays at the cap
         vm.warp(end0 + 15 minutes);
         vm.prank(alice);
@@ -1777,7 +1806,7 @@ contract BriefsTest is Test {
         inOvertime = 10 minutes;
         uint256 c = _case();
         uint256 end0 = b.getCase(c).endsAt;
-        _verdictAt(_file(c, alice, B1), true, end0 - 1 minutes);
+        _verdictAt(_fileAt(c, alice, B1, end0 - 1 minutes), true, end0 - 1 minutes);
         assertEq(b.getCase(c).endsAt, end0 + 5 minutes);
         inCap = 0;
         uint256 c2 = _case();
@@ -1806,10 +1835,10 @@ contract BriefsTest is Test {
         uint256 c = _case();
         Briefs.Case memory k0 = b.getCase(c);
         uint256 end0 = k0.endsAt;
-        _verdictAt(_file(c, alice, B1), true, k0.createdAt + 1 hours);
-        _verdictAt(_file(c, bob, B2), true, end0 - 5 minutes);
+        _verdictAt(_fileAt(c, alice, B1, k0.createdAt + 1 hours), true, k0.createdAt + 1 hours);
+        _verdictAt(_fileAt(c, bob, B2, end0 - 5 minutes), true, end0 - 5 minutes);
         for (uint256 i; i < 30; i++) { // bob keeps beating himself in overtime
-            uint256 id = _file(c, bob, string.concat("Bob again ", vm.toString(i)));
+            uint256 id = _fileAt(c, bob, string.concat("Bob again ", vm.toString(i)), b.getCase(c).endsAt - 1);
             _verdictAt(id, true, b.getCase(c).endsAt - 1);
         }
         assertGt(b.getCase(c).endsAt, end0 + 4 hours);
@@ -1829,8 +1858,8 @@ contract BriefsTest is Test {
         _reignParams();
         uint256 c = _case();
         uint256 end0 = b.getCase(c).endsAt;
-        _verdictAt(_file(c, alice, B1), true, end0 - 2 minutes); // pushes to end0 + 8 min
-        _verdictAt(_file(c, bob, B2), true, end0 + 3 minutes); // in overtime
+        _verdictAt(_fileAt(c, alice, B1, end0 - 2 minutes), true, end0 - 2 minutes); // pushes to end0 + 8 min
+        _verdictAt(_fileAt(c, bob, B2, end0 + 3 minutes), true, end0 + 3 minutes); // in overtime
         assertEq(b.getCase(c).endsAt, end0 + 13 minutes);
         vm.warp(end0 + 13 minutes);
         b.settle(c);
@@ -1858,6 +1887,10 @@ contract BriefsTest is Test {
         bytes32 h = MessageHashUtils.toEthSignedMessageHash(bytes(jury.relayMessage(c, B1, dan, deadline)));
         vm.prank(carol);
         imd.approve(address(jury), type(uint256).max);
+        vm.prank(carol); // a refund of nothing would cancel the brief for free
+        vm.expectRevert(BriefsJury.NothingToRefund.selector);
+        jury.refundRelay(c, B1, dan, deadline, sig, 0);
+        assertEq(jury.relayed(h), 0);
         vm.prank(carol); // anyone holding the signature, paying the refund
         jury.refundRelay(c, B1, dan, deadline, sig, 2 ether);
         assertEq(jury.relayed(h), 2);
@@ -2004,7 +2037,7 @@ contract BriefsTest is Test {
         assertEq(b.getCase(_case()).maxBrief, 500);
         inLang = 2; // no such language yet
         vm.prank(creator);
-        vm.expectRevert(BriefsText.NotEnglish.selector);
+        vm.expectRevert(BriefsText.UnknownLanguage.selector);
         b.openCase(_input(uint64(block.timestamp + 1 days)));
     }
 

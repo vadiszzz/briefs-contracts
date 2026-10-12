@@ -110,6 +110,7 @@ contract BriefsJury is Ownable2Step {
     error NotDelivered();
     error Lapsed();
     error WrongCourt();
+    error NothingToRefund();
 
     constructor(Oracle memory first, address owner_, address court_) Ownable(owner_) {
         _check(first);
@@ -311,6 +312,7 @@ contract BriefsJury is Ownable2Step {
     function refundRelay(uint256 caseId, string calldata words, address author, uint256 deadline, bytes calldata signature, uint256 amount)
         external
     {
+        if (amount == 0) revert NothingToRefund(); // a refund pays something: nobody cancels a signed brief for free
         bytes32 h = _relayHash(caseId, words, author, deadline, signature, true);
         relayed[h] = 2;
         refunded[h] += amount;

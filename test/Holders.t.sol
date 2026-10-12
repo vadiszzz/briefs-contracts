@@ -76,6 +76,8 @@ contract HoldersTest is Test {
     }
 
     /// holders-only cases come from the owner (this test contract); open ones from a creator
+    uint256 inCaseFee = 2 ether;
+
     function _open(uint256 minHold, uint256 dur) internal returns (uint256) {
         if (minHold == 0) vm.prank(creator);
         return b.openCase(
@@ -89,7 +91,7 @@ contract HoldersTest is Test {
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + dur),
                 minHold: minHold,
-                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: inCaseFee, creatorBps: 1_500, platformBps: 500
             })
         );
     }
@@ -140,7 +142,7 @@ contract HoldersTest is Test {
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + 1 days),
                 minHold: MIN_HOLD,
-                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500
             })
         );
         assertEq(b.getCase(_open(MIN_HOLD, 1 days)).creator, address(this));
@@ -212,10 +214,14 @@ contract HoldersTest is Test {
         Briefs.Params memory p = _params();
         p.caseFee = 5 ether;
         b.setParams(p);
+        vm.expectRevert(Briefs.SettingsChanged.selector); // the creator still sees the old fee
+        _open(0, 1 days);
+        inCaseFee = 5 ether;
         _open(0, 1 days);
         assertEq(imd.balanceOf(treasury), 5 ether);
         p.caseFee = 0; // free to open
         b.setParams(p);
+        inCaseFee = 0;
         _open(0, 1 days);
         assertEq(imd.balanceOf(treasury), 5 ether);
     }

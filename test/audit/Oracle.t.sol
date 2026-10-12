@@ -103,7 +103,7 @@ contract OracleAuditTest is Test {
         c = g.openCase(
             Briefs.CaseInput({
                 title: "Dragon Jokes", task: TASK, standard: STANDARD, opening: OPENING, avatar: 1, seed: 100 ether,
-                fee: 5 ether, endsAt: uint64(block.timestamp + 1 days), minHold: 0, oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
+                fee: 5 ether, endsAt: uint64(block.timestamp + 1 days), minHold: 0, oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500
             })
         );
     }

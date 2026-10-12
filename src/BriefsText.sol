@@ -12,6 +12,7 @@ contract BriefsText {
 
     error BadText();
     error NotEnglish();
+    error UnknownLanguage();
 
     /// @notice The languages a case can ask its briefs to be written in (Briefs.langOf): 0 any, 1 English. Room for
     ///         more: a new language needs its rules here (checkBrief) and its line in the question.
@@ -160,7 +161,7 @@ contract BriefsText {
                 if (uint8(t[i]) >= 0x80) revert NotEnglish();
             }
         } else if (lang >= LANGS) {
-            revert NotEnglish(); // no rules for that language yet
+            revert UnknownLanguage(); // no rules for that language yet
         }
     }
 

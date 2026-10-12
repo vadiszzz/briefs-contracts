@@ -198,7 +198,7 @@ abstract contract AuditBase is Test {
 
     function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: CASE_FEE, creatorBps: 1_500, platformBps: 500
         });
     }
 
@@ -370,15 +370,29 @@ contract FundsTest is AuditBase {
         assertEq(imd.balanceOf(address(b)), ORACLE_FEE, "0.5 IMD stuck with no liability and no way out");
     }
 
-    // F-5 (KNOWN): owner changes caseFee without delay; a creator whose leftover allowance covers the new price
-    // pays it (no max-price argument on openCase).
-    function test_Known_F5_CaseFeeChangeHitsPendingOpenCase() public {
+    // F-5 (fixed in v2): the creator signs the case fee and the split they saw; a change in between reverts
+    // instead of charging the new price.
+    function test_Fixed_F5_CaseFeeChangeHitsPendingOpenCase() public {
         Briefs.Params memory p = _params();
         p.caseFee = 1_000 ether;
         b.setParams(p); // e.g. front-running the creator's openCase
         uint256 before = imd.balanceOf(creator);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
         _case();
-        assertEq(before - imd.balanceOf(creator), 1_000 ether + SEED, "no max-price guard on openCase");
+        assertEq(imd.balanceOf(creator), before);
+        Briefs.CaseInput memory x = _input(uint64(block.timestamp + 1 days));
+        x.caseFee = 1_000 ether; // the creator agrees to the new price
+        vm.prank(creator);
+        b.openCase(x);
+        assertEq(before - imd.balanceOf(creator), 1_000 ether + SEED);
+    }
+
+    function test_Fixed_F5_SplitChangeRevertsToo() public {
+        Briefs.Params memory p = _params();
+        p.creatorBps = 0;
+        b.setParams(p);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
+        _case();
     }
 
     // ------------------------------------------------------------ checked and fine
@@ -467,7 +481,7 @@ contract FundsHandler is Test {
         dur = bound(dur, 10 minutes, 3 days);
         Briefs.CaseInput memory x = Briefs.CaseInput({
             title: "Title", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 1,
-            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0, oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0
+            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0, oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0, caseFee: b.getParams().caseFee, creatorBps: b.getParams().creatorBps, platformBps: b.getParams().platformBps
         });
         vm.prank(a);
         caseIds.push(b.openCase(x));
@@ -656,7 +670,7 @@ contract FundsHandler is Test {
             title: "Holders", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 2,
             seed: bound(seed, 10 ether, 1000 ether), fee: bound(fee, 1 ether, 50 ether),
             endsAt: uint64(block.timestamp + bound(dur, 10 minutes, 3 days)), minHold: bound(minHold, 1, 100 ether),
-            oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0
+            oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0, caseFee: b.getParams().caseFee, creatorBps: b.getParams().creatorBps, platformBps: b.getParams().platformBps
         });
         try b.openCase(x) returns (uint256 c) {
             caseIds.push(c);

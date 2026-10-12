@@ -88,7 +88,7 @@ contract GatewayTest is Test {
                 fee: 2 ether,
                 endsAt: uint64(block.timestamp + 1 days),
                 minHold: 0,
-                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500
             })
         );
     }

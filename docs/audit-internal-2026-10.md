@@ -32,7 +32,7 @@ Test suite after the fixes: 83 tests, all passing, including an exact solvency i
 
 - **Fee-on-transfer token (Low).** The contract assumes IMD is a plain ERC20. Confirm the Robinhood Chain IMD before deploying.
 - **Surplus IMD is locked (Low).** IMD sent outside the accounting (including any refund IMD might send for unanswered requests) can't leave the contract. Ask IMD whether unanswered requests are refunded; if so, add a sweep of anything above liabilities to the treasury.
-- **`caseFee` can change instantly (Low).** A malicious owner could raise it in front of a pending `openCase` if the creator's allowance covers it. Bounded by `setParams`; consider a delay or a `maxCaseFee` argument.
+- **`caseFee` can change instantly (Low).** A malicious owner could raise it in front of a pending `openCase` if the creator's allowance covers it. Bounded by `setParams`; consider a delay or a `maxCaseFee` argument. (Fixed in v2: `openCase` names the fee and split it agreed to; see the eighth review.)
 - ~~**Push payments (Low).**~~ Fixed in the fourth review: the IMD token on Robinhood Chain *can* block addresses, so a refused payment is now held for its payee instead.
 - **Late answer race (Low).** After the 4-minute window plus 2-minute grace, anyone (usually the leader) can call `mistrial` ahead of a COOKED answer that was issued on time but not yet delivered. Our keeper delivers within seconds.
 - **Attester rotation doesn't reach running cases (Info).** A compromised IMD key can't be revoked for cases already using it.
@@ -203,3 +203,29 @@ and keeper send. Briefs is 24,323 bytes, 253 under the limit; new code should go
   seconds), and the optimizer runs 100 times instead of 200 (a little more gas per call, well under the 7M floor).
 - Tests: `test_Lang_*` (4), and the e2e "an English case" on anvil (the jury's signed answer for the English question
   lands).
+
+## Eighth review: English-only cases and a fresh full review of v2 (October 2026)
+
+Three independent reviewers: one on the language change, one on all of v2 from scratch (contracts), one on the
+server and site (relayer, keeper, views, the create and case pages). Everything below is fixed unless it says
+otherwise; each contract fix has a test.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | A leader could hold the lead longer by stuffing the queue: time was credited from the verdict, so its own briefs filed ahead of a challenger (or a slow hearing) kept the clock running for it | Time counts from when a brief was **filed** (`_newLeader(caseId, c, filedAt)`: from the later of the filing and the previous lead's start) until the next leader's filing, capped at the first deadline. A brief filed before the deadline and heard after it earns its time up to the deadline; one filed in overtime earns none. `test_Reign_StuffingTheQueueBuysTheLeaderNothing`, `test_Reign_ALeaderHeardAfterTheDeadline…` |
+| 2 | Medium | Relayer: under a lagging RPC node, a landed refund could still read as owed and be paid a second time | Our own landed refunds are added up from their receipts (`refund_seen`, a floor); the chain's `refunded` is read at the receipt's block (or the block where the nonce was seen used) as well as at the latest one, and the most of all counts |
+| 3 | Medium | Relayer: payments were recognised only as an exact 100-byte call to the token, so a smart account's batch (EIP-7702) or a wallet appending data was not found | A payment is a transaction from the signer whose calldata contains `transfer(payTo, amount)` immediately followed by the message hash, anywhere; what it paid comes from the token's `Transfer` logs. One transaction pays for one brief (a second job naming it fails) |
+| 4 | Medium | `testnet-up.mjs` decided "older contracts" by `holderToken()`, which v1 has too, so a v1 testnet would not be redeployed for v2 | It probes `langOf`, which only v2 has |
+| 5 | Low | `refundRelay` with amount 0 marked a message refunded for free, so anyone holding a signature could cancel the brief | `NothingToRefund` unless the refund pays more than 0 |
+| 6 | Low | `caseFee` and the fee split were not pinned: an owner change landing before a pending `openCase` charged the new price (known as F-5 since v1) | `CaseInput` carries `caseFee`, `creatorBps` and `platformBps`; they must equal the settings (`SettingsChanged`). The site sends what it showed and names the change. `test_Fixed_F5_*` |
+| 7 | Low | `CaseInput.lang` above the known languages reverted `NotEnglish` | `UnknownLanguage` |
+| 8 | Low | Site: the brief limit field took values like `1e2`; counters counted the typed text, not the text sent after the English substitutes; a relaunch dropped the language and limit; the opening brief of an English case was checked only at sending | The limit is a whole number (text field, digits only); counters count the converted text; a relaunch copies the language and limit; `validateCase` checks the converted opening brief and the limit |
+| 9 | Low | `/api/relay/message` trusted the player's clock for the signature's deadline | The server sets it (two hours ahead) and returns it; a named one is still accepted within a day |
+| 10 | Low | Two multi-sentence notes on the create page lacked their final period; a case's limit was printed unescaped | Fixed |
+| 11 | Info | The English check is on the script (ASCII), not the language: a brief in another Latin-script language passes, and the case's own title, task and standard may be in any language | Documented. The jury is told answers must be in English |
+| 12 | Info | `MIN_BRIEF` was unused; `verify/standard-input.json` is v1's (200 runs) | Removed; the verify README says it must be rebuilt before v2 is deployed |
+| 13 | Info | Shares for time in the lead leave a few wei of rounding in the pool | Accepted (bounded by the number of leaders, tested) |
+| 14 | Info | The keeper picked leaders to pay by verdict time; the dev banner ignored `PORT` | It picks by filing time before the first deadline (the contract's rule); the banner uses `PORT` |
+
+The site and API mirror the new rule (`views.reignOf`, unit-tested against the same cases as the contract).
+Briefs is 24,400 bytes, 176 under the limit.

@@ -39,8 +39,9 @@ import {BriefsJury} from "./BriefsJury.sol";
 ///         holderToken may file briefs in them. Token and amount are fixed when the case opens.
 ///         Oracle setups and answer checks live in BriefsJury (new setups only after a public delay).
 ///
-///         The pot: reignBps of it is shared by time as the leader (from the first challenger to take the lead until
-///         the deadline), the rest goes to the final leader. A new leader late in a case pushes its deadline
+///         The pot: reignBps of it is shared by time as the leader (from when the first winning challenger was filed
+///         until the deadline; each leader counts from its own filing, so the queue moves nobody's time), the rest
+///         goes to the final leader. A new leader late in a case pushes its deadline
 ///         (overtime), up to a final limit when the case has one. The owner sets the share and the limit, or lets
 ///         each creator pick them; either way a case fixes them when it opens.
 ///
@@ -56,7 +57,6 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     // their limit counts UTF-8 bytes: IMD takes questions up to 2,000 characters, and a byte is never less than a
     // character however IMD counts them (code points, UTF-16 units or bytes). A question carries the task, the
     // standard, two briefs and under 400 bytes of wording, so a brief can never be longer than 600 bytes.
-    uint256 public constant MIN_BRIEF = 1;
     uint256 public constant BRIEF_CAP = 600;
     uint256 public constant BRIEF_FLOOR = 100;
     uint256 public constant DURATION_FLOOR = 5 minutes;
@@ -318,6 +318,10 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         // them (0: the court's maxBrief). In English a byte is a character, so it is a limit in characters
         uint8 lang;
         uint16 maxBrief;
+        // what opening costs and how fees split, as the creator saw them (the owner may change them for new cases)
+        uint256 caseFee;
+        uint16 creatorBps;
+        uint16 platformBps;
     }
 
     /// @notice Open a case. The creator's opening brief is the first precedent; the seed is the starting pot.
@@ -467,7 +471,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         _split(c, uint256(c.fee) - b.oracleReserve); // a verdict at last: the fee less the jury's price is split now
         if (better) {
             b.status = BriefStatus.Overruled;
-            _newLeader(caseId, c); // the new leader's seconds are credited when it is replaced or at settlement
+            _newLeader(caseId, c, b.filedAt); // its seconds are credited when it is replaced or at settlement
             c.precedent = uint64(briefId);
             c.streak = 0;
         } else {
@@ -627,7 +631,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         // a setting the creator can't pick must be the one they saw: the owner may have changed it since
         if (p.creatorSetsReign ? x.reignBps > REIGN_CAP_BPS : x.reignBps != p.reignBps) revert SettingsChanged();
         if (p.creatorSetsCap ? x.finalCap > DURATION_CAP : x.finalCap != p.finalCap) revert SettingsChanged();
-        if (x.overtime != p.overtime) revert SettingsChanged();
+        if (x.overtime != p.overtime || x.caseFee != p.caseFee || x.creatorBps != p.creatorBps || x.platformBps != p.platformBps) {
+            revert SettingsChanged();
+        }
         c.reignBps = x.reignBps;
         c.overtime = x.overtime;
         if (x.finalCap != 0) c.finalEnd = endsAt + x.finalCap;
@@ -727,20 +733,23 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         emit HearingOpened(briefId, caseId, precedentId, requestId);
     }
 
-    /// @dev A challenger just took the lead (COOKED). The leader it replaced is credited its time until now, never past
-    ///      the case's first deadline (reignEnd): overtime decides the final leader but earns nobody time, so stretching
-    ///      a case never dilutes what earlier leaders earned. The opening brief earns none. A new leader in the case's
-    ///      last `overtime` seconds, before the deadline, pushes the deadline to now + overtime, never past finalEnd.
-    function _newLeader(uint256 caseId, Case storage c) private {
+    /// @dev A challenger just took the lead (COOKED). Its time counts from when it was **filed**: it was better from
+    ///      then on, and the queue (FIFO, one hearing at a time) only decided when that came to light, so nobody gains
+    ///      time by filling the queue ahead of a challenger, or by a slow jury or relay. The leader it replaces is
+    ///      credited until that moment, never past the case's first deadline (reignEnd): overtime decides the final
+    ///      leader but earns nobody time. The opening brief earns none. A new leader in the case's last `overtime`
+    ///      seconds, before the deadline, pushes the deadline to now + overtime, never past finalEnd.
+    function _newLeader(uint256 caseId, Case storage c, uint256 filedAt) private {
         uint256 t = block.timestamp;
         uint256 end = c.endsAt;
         uint256 stop = c.reignEnd;
-        uint256 start = c.reignStart; // always before stop when set
-        if (start != 0) reignOf[caseId][briefs[c.precedent].author] += (t < stop ? t : stop) - start;
-        c.reignStart = 0; // a lead taken at or after the first deadline earns no time
-        if (t < stop) {
-            if (c.firstReign == 0) c.firstReign = uint64(t);
-            c.reignStart = uint64(t);
+        uint256 start = c.reignStart; // always before stop when set, and never after a later brief's filing (FIFO)
+        uint256 from = filedAt > start ? filedAt : start;
+        if (start != 0) reignOf[caseId][briefs[c.precedent].author] += (from < stop ? from : stop) - start;
+        c.reignStart = 0; // filed at or after the first deadline: no time to earn
+        if (from < stop) {
+            if (c.firstReign == 0) c.firstReign = uint64(from);
+            c.reignStart = uint64(from);
         }
         if (t < end) {
             uint256 later = t + c.overtime;
