@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Briefs} from "../../src/Briefs.sol";
 import {BriefsText} from "../../src/BriefsText.sol";
@@ -187,7 +188,7 @@ abstract contract AuditBase is Test {
             quorum: 6,
             answerTimeout: 4 minutes,
             caseFee: CASE_FEE,
-            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: 500
+            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: 500, reignBps: 0, overtime: 0, finalCap: 0, creatorSetsReign: false, creatorSetsCap: false
         });
     }
 
@@ -197,7 +198,7 @@ abstract contract AuditBase is Test {
 
     function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
         });
     }
 
@@ -406,53 +407,6 @@ contract FundsTest is AuditBase {
         assertEq(imd.balanceOf(creator) - before, 0.075 ether);
     }
 
-    function test_OK_SinkCannotTakeMoreThanHalfOrReenter() public {
-        GreedySink sink = new GreedySink(b);
-        b.proposeSink(sink, 5_000);
-        vm.warp(block.timestamp + 2 days);
-        b.applySink();
-        uint256 c = _case();
-        for (uint256 i; i < 4; i++) _file(c, alice, string.concat("Joke ", vm.toString(i)));
-        uint256 owedCreator = b.getCase(c).creatorOwed;
-        uint256 pot = b.getCase(c).pot;
-
-        uint256[4] memory modes = [uint256(1), 2, 3, 4];
-        for (uint256 m; m < 4; m++) {
-            _file(c, bob, string.concat("More ", vm.toString(m)));
-            _judge(b.getCase(c).hearing, false); // the next hearing opens: its fee is split, the platform accrues
-            owedCreator = b.getCase(c).creatorOwed;
-            pot = b.getCase(c).pot;
-            sink.setMode(modes[m]);
-            uint256 owed = b.platformOwed();
-            uint256 sinkBefore = imd.balanceOf(address(sink));
-            uint256 tBefore = imd.balanceOf(treasury);
-            b.withdrawPlatform();
-            uint256 toSink = imd.balanceOf(address(sink)) - sinkBefore;
-            assertLe(toSink, owed / 2);
-            assertEq(toSink + imd.balanceOf(treasury) - tBefore, owed);
-            assertEq(b.getCase(c).creatorOwed, owedCreator);
-            assertEq(b.getCase(c).pot, pot);
-        }
-    }
-
-    function test_OK_SinkTimelockResetsOnRepropose() public {
-        GreedySink sink = new GreedySink(b);
-        b.proposeSink(sink, 5_000);
-        vm.warp(block.timestamp + 2 days - 1);
-        b.proposeSink(sink, 5_000); // re-propose: the clock restarts
-        vm.warp(block.timestamp + 1);
-        vm.expectRevert(Briefs.TooEarly.selector);
-        b.applySink();
-        vm.expectRevert(Briefs.BadParams.selector);
-        b.proposeSink(sink, 5_001);
-        vm.expectRevert(Briefs.BadParams.selector);
-        b.proposeSink(IRewardsSink(address(0)), 1);
-        // note: a ready proposal never expires; anyone can apply it a year later
-        vm.warp(block.timestamp + 365 days);
-        b.applySink();
-        assertEq(b.rewardsBps(), 5_000);
-    }
-
     function test_OK_RequesterCannotReenter() public {
         ReentrantRequester r = new ReentrantRequester(IERC20(address(imd)));
         _useOracle(r);
@@ -513,7 +467,7 @@ contract FundsHandler is Test {
         dur = bound(dur, 10 minutes, 3 days);
         Briefs.CaseInput memory x = Briefs.CaseInput({
             title: "Title", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 1,
-            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0, oracleId: uint32(b.jury().latest())
+            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0, oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0
         });
         vm.prank(a);
         caseIds.push(b.openCase(x));
@@ -526,6 +480,26 @@ contract FundsHandler is Test {
         if (k.status != Briefs.CaseStatus.Open || block.timestamp >= k.endsAt) return;
         vm.prank(actors[who % 4]);
         b.fileBrief(c, string.concat("Brief ", vm.toString(++ghostBriefs)));
+    }
+
+    /// the handler relays a brief signed by a player who pays elsewhere (it holds IMD and has approved Briefs)
+    function fileFor(uint256 who, uint256 ci) external {
+        if (caseIds.length == 0) return;
+        uint256 c = caseIds[ci % caseIds.length];
+        Briefs.Case memory k = b.getCase(c);
+        if (k.status != Briefs.CaseStatus.Open || block.timestamp >= k.endsAt) return;
+        uint256 pk = 0xA11CE + (who % 3);
+        string memory words = string.concat("Relayed ", vm.toString(++ghostBriefs));
+        uint256 deadline = block.timestamp + 1 hours;
+        string memory m = b.jury().relayMessage(c, words, vm.addr(pk), deadline);
+        (uint8 v, bytes32 r, bytes32 s_) = vm.sign(pk, MessageHashUtils.toEthSignedMessageHash(bytes(m)));
+        // now and then the relayer refunds instead and cancels the signature: then it can never be filed
+        if (who % 5 == 4) {
+            imd.approve(address(b.jury()), k.fee);
+            b.jury().refundRelay(c, words, vm.addr(pk), deadline, abi.encodePacked(r, s_, v), k.fee);
+            return;
+        }
+        b.fileBriefFor(c, words, vm.addr(pk), deadline, abi.encodePacked(r, s_, v));
     }
 
     function judge(uint256 ci, bool better) external {
@@ -633,6 +607,12 @@ contract FundsHandler is Test {
         } catch {}
     }
 
+    /// pays a settled case's time-as-leader share to one of the actors (anyone may)
+    function claimReign(uint256 ci, uint256 who) external {
+        if (caseIds.length == 0) return;
+        try b.claimReign(caseIds[ci % caseIds.length], actors[who % 4]) {} catch {}
+    }
+
     function raiseReserve(uint256 ci) external {
         if (caseIds.length == 0) return;
         try b.raiseReserve(caseIds[ci % caseIds.length]) {} catch {}
@@ -649,7 +629,10 @@ contract FundsHandler is Test {
             minSeed: 10 ether, minFee: 1 ether, maxOracleFee: bound(maxOracleFee, 0, 5 ether),
             creatorBps: uint16(bound(creatorBps, 0, 3_000)), platformBps: uint16(bound(platformBps, 0, 3_000)),
             panelSize: 11, quorum: 6, answerTimeout: 4 minutes, caseFee: bound(caseFee, 0, 1_000 ether),
-            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: uint16(bound(maxBrief, 100, 600))
+            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: uint16(bound(maxBrief, 100, 600)),
+            reignBps: uint16(bound(maxBrief, 0, 9_000)), overtime: uint32(bound(caseFee, 0, 1 hours)),
+            finalCap: uint32(bound(maxOracleFee, 0, 7 days)), creatorSetsReign: creatorBps % 2 == 0,
+            creatorSetsCap: platformBps % 2 == 0
         });
         try b.setParams(p) {} catch {}
     }
@@ -659,21 +642,6 @@ contract FundsHandler is Test {
         address[6] memory t =
             [actors[0], actors[1], address(0xBEEF), address(b), address(b.jury()), address(requester)];
         try b.setTreasury(t[pick % t.length]) {} catch {}
-    }
-
-    /// a rewards sink: honest, pulling double, re-entering, or with no code at all; applied after its delay
-    function setSink(uint256 mode, uint256 bps) external {
-        bps = bound(bps, 0, 5_000);
-        IRewardsSink sink;
-        if (bps != 0) {
-            GreedySink g = new GreedySink(b);
-            g.setMode(mode % 4); // not mode 4: a sink that hands IMD back is a donation, outside the accounting
-            sink = g;
-        }
-        try b.proposeSink(sink, uint16(bps)) {} catch { return; }
-        vm.warp(block.timestamp + 2 days);
-        try b.applySink() {} catch {}
-        if (bps != 0 && mode % 5 == 4) vm.etch(address(sink), ""); // the sink loses its code after the fact
     }
 
     /// a holders-only case (only the owner opens them); actors 0 and 1 hold the token, 2 and 3 don't
@@ -688,7 +656,7 @@ contract FundsHandler is Test {
             title: "Holders", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 2,
             seed: bound(seed, 10 ether, 1000 ether), fee: bound(fee, 1 ether, 50 ether),
             endsAt: uint64(block.timestamp + bound(dur, 10 minutes, 3 days)), minHold: bound(minHold, 1, 100 ether),
-            oracleId: uint32(b.jury().latest())
+            oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0
         });
         try b.openCase(x) returns (uint256 c) {
             caseIds.push(c);
@@ -722,9 +690,10 @@ contract FundsInvariantTest is StdInvariant, AuditBase {
             Briefs.Case memory k = b.getCase(c);
             total += k.creatorOwed;
             if (k.status == Briefs.CaseStatus.Open) total += k.pot;
-            uint256[] memory ids = b.docket(c, k.head, type(uint256).max);
-            for (uint256 j; j < ids.length; j++) {
-                require(b.getBrief(ids[j]).status == Briefs.BriefStatus.Queued, "waiting brief not queued");
+            else total += k.reignPool - k.reignPaid; // settled: time-as-leader shares not yet paid
+            uint256 queued = b.waiting(c) - (k.hearing != 0 ? 1 : 0);
+            for (uint256 j; j < queued; j++) {
+                require(b.getBrief(b.docketOf(c, k.head + j)).status == Briefs.BriefStatus.Queued, "waiting brief not queued");
                 total += k.fee;
             }
             if (k.hearing != 0) total += k.fee - b.getBrief(k.hearing).oracleReserve;

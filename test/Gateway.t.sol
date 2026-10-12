@@ -63,7 +63,7 @@ contract GatewayTest is Test {
                 caseFee: 2 ether,
                 minDuration: 10 minutes,
                 maxDuration: 90 days,
-                maxBrief: 500
+                maxBrief: 500, reignBps: 0, overtime: 0, finalCap: 0, creatorSetsReign: false, creatorSetsCap: false
             })
         );
         adapter.setClient(address(b));
@@ -88,7 +88,7 @@ contract GatewayTest is Test {
                 fee: 2 ether,
                 endsAt: uint64(block.timestamp + 1 days),
                 minHold: 0,
-                oracleId: 0
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
             })
         );
     }

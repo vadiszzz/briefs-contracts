@@ -80,10 +80,15 @@ contract Deploy is Script {
             panelSize: 11, // odd panel, simple majority: one side always reaches 6, so the jury never splits
             quorum: 6,
             answerTimeout: 4 minutes, // the swarm answered in 43–63 s in our live probe; this only covers outages
-            caseFee: 2 ether, // flat price of opening a case, to the treasury
+            caseFee: 1 ether, // flat price of opening a case, to the treasury
             minDuration: 10 minutes, // how short and how long a new case may run
             maxDuration: 90 days,
-            maxBrief: 500 // UTF-8 bytes per brief (at most 600: IMD's question limit)
+            maxBrief: 500, // UTF-8 bytes per brief (at most 600: IMD's question limit)
+            reignBps: 6_000, // 60% of the pot is paid for time as the leader, 40% to the final leader
+            overtime: 10 minutes, // a new leader in the last 10 minutes pushes the deadline to now + 10 minutes
+            finalCap: 0, // no limit on how long overtime may run
+            creatorSetsReign: false, // creators take the settings above
+            creatorSetsCap: false
         });
 
         address treasury = vm.envOr("TREASURY", msg.sender);

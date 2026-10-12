@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
@@ -120,7 +122,7 @@ contract BriefsTest is Test {
             quorum: 6,
             answerTimeout: 4 minutes,
             caseFee: CASE_FEE,
-            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: 500
+            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: 500, reignBps: 0, overtime: 0, finalCap: 0, creatorSetsReign: false, creatorSetsCap: false
         });
     }
 
@@ -128,9 +130,16 @@ contract BriefsTest is Test {
         return BriefsJury.Oracle({signer: signer, requester: r, domain: domain, chainId: 1, hearingGas: 3_000_000});
     }
 
+    // what _input asks for (the settings the owner set, or the creator's pick): a view call here would eat a vm.prank
+    uint16 inReign;
+    uint32 inCap;
+    uint32 inOvertime;
+    uint8 inLang;
+    uint16 inMax;
+
     function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: inReign, finalCap: inCap, overtime: inOvertime, lang: inLang, maxBrief: inMax
         });
     }
 
@@ -586,35 +595,6 @@ contract BriefsTest is Test {
         b.withdrawPlatform();
     }
 
-    function test_RewardsSinkIsDelayedCappedAndNeverReachesBack() public {
-        Sink sink = new Sink();
-        vm.expectRevert(Briefs.BadParams.selector);
-        b.proposeSink(sink, 5_001); // never more than half of the platform's share
-        vm.prank(alice);
-        vm.expectRevert();
-        b.proposeSink(sink, 5_000); // owner only
-
-        uint256 c = _case();
-        _judge(_file(c, alice, B1), false); // accrued before the change: all to the treasury
-        b.proposeSink(sink, 5_000);
-        vm.expectRevert(Briefs.TooEarly.selector);
-        b.applySink();
-        vm.warp(block.timestamp + 2 days);
-        b.applySink();
-        assertEq(imd.balanceOf(treasury), CASE_FEE + TO_PLATFORM);
-        assertEq(address(b.rewardsSink()), address(sink));
-        assertEq(b.rewardsBps(), 5_000);
-
-        vm.prank(creator);
-        uint256 c2 = b.openCase(_input(uint64(block.timestamp + 1 days)));
-        _judge(_file(c2, bob, B2), false);
-        b.withdrawPlatform();
-        assertEq(imd.balanceOf(address(sink)), TO_PLATFORM / 2);
-        assertEq(sink.notified(), TO_PLATFORM / 2);
-        assertEq(imd.balanceOf(treasury), 2 * CASE_FEE + TO_PLATFORM + TO_PLATFORM / 2);
-        assertEq(b.getCase(c2).pot, SEED + TO_POT); // pots untouched
-    }
-
     // ------------------------------------------------------------ the oracle misbehaving
 
     function test_ARequesterFailureStallsTheDocketWithoutBlockingAnswers() public {
@@ -907,25 +887,6 @@ contract BriefsTest is Test {
         assertEq(b.getCase(c).precedent, a1);
     }
 
-    function test_ABrokenSinkCannotLockThePlatformShare() public {
-        Sink sink = new Sink();
-        b.proposeSink(sink, 5_000);
-        vm.warp(block.timestamp + 2 days);
-        b.applySink();
-        uint256 c = _case();
-        _judge(_file(c, alice, B1), false);
-        sink.setBroken(true);
-        b.withdrawPlatform(); // the sink's part goes to the treasury instead
-        assertEq(imd.balanceOf(treasury), CASE_FEE + TO_PLATFORM);
-        assertEq(imd.balanceOf(address(sink)), 0);
-        _judge(_file(c, bob, B2), false); // bob's fee is split on his verdict
-        b.proposeSink(IRewardsSink(address(0)), 0); // and it can still be removed
-        vm.warp(block.timestamp + 2 days);
-        b.applySink();
-        assertEq(address(b.rewardsSink()), address(0));
-        assertEq(imd.balanceOf(treasury), CASE_FEE + 2 * TO_PLATFORM);
-    }
-
     function test_OutOfGasCannotFakeAStall() public {
         HeavyRequester heavy = new HeavyRequester(IERC20(address(imd)));
         jury.proposeOracle(_oracle(vm.addr(key), heavy));
@@ -996,9 +957,9 @@ contract BriefsTest is Test {
     function _assertSolvent(uint256 c) internal view {
         Briefs.Case memory k = b.getCase(c);
         uint256 escrow;
-        uint256[] memory ids = b.docket(c, k.head, 100);
-        for (uint256 i; i < ids.length; i++) {
-            assertEq(uint8(_status(ids[i])), uint8(Briefs.BriefStatus.Queued));
+        uint256 queued = b.waiting(c) - (k.hearing != 0 ? 1 : 0);
+        for (uint256 i; i < queued; i++) {
+            assertEq(uint8(_status(b.docketOf(c, k.head + i))), uint8(Briefs.BriefStatus.Queued));
             escrow += k.fee; // a queued brief owes its whole fee back if it is never heard
         }
         // the brief being heard: its fee less the jury's price waits for the verdict (or goes back on a mistrial)
@@ -1205,26 +1166,6 @@ contract BriefsTest is Test {
     }
 
     // ------------------------------------------------------------ IMD swarm audit (Oct 2026), one test per finding
-
-    /// 1: a sink must be a contract; one that loses its code later is treated as broken, not as a lock
-    function test_Swarm1_ACodelessSinkIsRefusedAndNeverLocksThePlatformShare() public {
-        vm.expectRevert(Briefs.BadParams.selector);
-        b.proposeSink(IRewardsSink(makeAddr("eoa-sink")), 2_000);
-        Sink sink = new Sink();
-        b.proposeSink(sink, 5_000);
-        vm.warp(block.timestamp + 2 days);
-        b.applySink();
-        uint256 c = _case();
-        _judge(_file(c, alice, B1), false);
-        vm.etch(address(sink), ""); // the sink's code is gone
-        b.withdrawPlatform(); // all of it to the treasury
-        assertEq(imd.balanceOf(treasury), CASE_FEE + TO_PLATFORM);
-        assertEq(b.platformOwed(), 0);
-        b.proposeSink(IRewardsSink(address(0)), 0); // and it can still be replaced
-        vm.warp(block.timestamp + 2 days);
-        b.applySink();
-        assertEq(address(b.rewardsSink()), address(0));
-    }
 
     /// 2: a requester that answers fee() or answerSource() with garbage stalls the case; it never freezes it
     function test_Swarm2_MalformedRequesterRepliesStallInsteadOfFreezing() public {
@@ -1526,5 +1467,571 @@ contract BriefsTest is Test {
         jury.proposeOracle(o);
         o.hearingGas = 4_000_000;
         jury.proposeOracle(o);
+    }
+
+    // ------------------------------------------------------------ time as the leader, final share, overtime
+
+    function _reignParams() internal {
+        Briefs.Params memory p = _params();
+        p.reignBps = 6_000;
+        p.overtime = 10 minutes;
+        b.setParams(p);
+        inReign = 6_000;
+        inOvertime = 10 minutes;
+    }
+
+    /// the verdict on `briefId` lands at `t`
+    function _verdictAt(uint256 briefId, bool better, uint256 t) internal {
+        vm.warp(t);
+        (ImdOracle.AttestationV2 memory a, bytes memory sig) = _att(briefId, better);
+        vm.prank(keeper);
+        b.fulfill(briefId, a, sig);
+    }
+
+    /// 24 h case: alice leads from 6 h to 12 h, bob from 12 h to the end. The first 6 h are nobody's, so the pool for
+    /// time as the leader is 60% × 18/24 of the pot, split 6:12; the final leader (bob) also takes the rest
+    function test_Reign_ThePotIsSplitByTimeAsTheLeaderAndTheFinalLeader() public {
+        _reignParams();
+        uint256 t0 = block.timestamp;
+        uint256 c = _case();
+        uint256 a1 = _file(c, alice, B1);
+        _verdictAt(a1, true, t0 + 6 hours); // alice takes the lead
+        uint256 b1 = _file(c, bob, B2);
+        _verdictAt(b1, true, t0 + 12 hours); // bob takes it from her
+        uint256 c1 = _file(c, carol, "A third brief");
+        _verdictAt(c1, false, t0 + 20 hours); // denied: bob keeps leading
+        vm.warp(t0 + 1 days);
+        uint256 pot = b.getCase(c).pot;
+        assertEq(pot, SEED + 3 * TO_POT);
+        uint256 bobBefore = imd.balanceOf(bob);
+        b.settle(c);
+        Briefs.Case memory k = b.getCase(c);
+        assertEq(k.reignTotal, 18 hours);
+        assertEq(k.reignPool, (pot * 6_000 * 18 hours) / (10_000 * 24 hours)); // 45% of the pot
+        assertEq(b.reignOf(c, alice), 6 hours);
+        assertEq(b.reignOf(c, bob), 12 hours);
+        assertEq(b.reignOf(c, creator), 0); // the opening brief earns no time
+        assertEq(imd.balanceOf(bob), bobBefore + pot - k.reignPool); // the final share, pushed at settlement
+        uint256 aliceBefore = imd.balanceOf(alice);
+        vm.prank(carol);
+        b.claimReign(c, alice); // anyone may pay it out
+        assertEq(imd.balanceOf(alice), aliceBefore + k.reignPool / 3);
+        b.claimReign(c, bob);
+        assertEq(imd.balanceOf(bob), bobBefore + pot - k.reignPool + (k.reignPool * 2) / 3);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claimReign(c, bob); // once
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claimReign(c, carol); // never led
+        assertLe(b.getCase(c).reignPaid, k.reignPool);
+        assertLt(k.reignPool - b.getCase(c).reignPaid, 3); // rounding dust only
+    }
+
+    /// nobody ever took the lead: the creator's opening brief takes the whole pot, as before
+    function test_Reign_NoChallengerWinsThenTheWholePotGoesToTheOpeningBrief() public {
+        _reignParams();
+        uint256 c = _case();
+        _judge(_file(c, alice, B1), false);
+        vm.warp(b.getCase(c).endsAt);
+        uint256 before = imd.balanceOf(creator);
+        uint256 pot = b.getCase(c).pot;
+        b.settle(c);
+        assertEq(b.getCase(c).reignPool, 0);
+        assertEq(imd.balanceOf(creator), before + pot);
+    }
+
+    /// a new leader in the last 10 minutes pushes the deadline to now + 10 minutes, again and again, with no cap;
+    /// entries stay open meanwhile and the extra time counts as time as the leader
+    function test_Reign_OvertimeKeepsTheEndAlive() public {
+        _reignParams();
+        uint256 c = _case();
+        uint256 end0 = b.getCase(c).endsAt;
+        uint256 a1 = _file(c, alice, B1);
+        _verdictAt(a1, true, end0 - 11 minutes); // not in the last 10 minutes: no overtime
+        assertEq(b.getCase(c).endsAt, end0);
+        uint256 b1 = _file(c, bob, B2);
+        _verdictAt(b1, true, end0 - 4 minutes);
+        assertEq(b.getCase(c).endsAt, end0 + 6 minutes); // now + 10 min
+        uint256 t = end0 - 4 minutes;
+        for (uint256 i; i < 20; i++) {
+            // past the original deadline, entries are still open
+            address who = i % 2 == 0 ? carol : alice;
+            uint256 id = _file(c, who, string.concat("Overtime brief ", vm.toString(i)));
+            t = b.getCase(c).endsAt - 1;
+            _verdictAt(id, true, t);
+            assertEq(b.getCase(c).endsAt, t + 10 minutes);
+        }
+        uint256 end = b.getCase(c).endsAt;
+        assertGt(end, end0 + 3 hours); // no cap
+        vm.warp(end);
+        vm.prank(bob);
+        vm.expectRevert(Briefs.EntriesClosed.selector);
+        b.fileBrief(c, "Too late");
+        b.settle(c);
+        Briefs.Case memory k = b.getCase(c);
+        // time in the lead stops at the first deadline: the hours of overtime only decided the final leader
+        assertEq(k.reignTotal, 11 minutes);
+        assertEq(b.reignOf(c, alice), 7 minutes);
+        assertEq(b.reignOf(c, bob), 4 minutes);
+        assertEq(b.reignOf(c, alice) + b.reignOf(c, bob) + b.reignOf(c, carol), k.reignTotal);
+        assertEq(k.reignPool, (SEED + 22 * TO_POT) * 6_000 * 11 minutes / (10_000 * (end0 - k.createdAt)));
+    }
+
+    /// a brief heard after the deadline can still take the lead and the final share, but earns no time and no overtime
+    function test_Reign_ALeaderAfterTheDeadlineTakesTheFinalShareButNoTime() public {
+        _reignParams();
+        uint256 t0 = block.timestamp;
+        uint256 c = _case();
+        uint256 a1 = _file(c, alice, B1);
+        _verdictAt(a1, true, t0 + 1 hours);
+        uint256 b1 = _file(c, bob, B2); // its hearing opens now, its verdict lands after the deadline
+        uint256 end = b.getCase(c).endsAt;
+        _verdictAt(b1, true, end + 1 minutes);
+        assertEq(b.getCase(c).endsAt, end); // no overtime after the deadline
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled)); // the docket is clear: settled
+        Briefs.Case memory k = b.getCase(c);
+        assertEq(k.winner, bob);
+        assertEq(b.reignOf(c, alice), end - (t0 + 1 hours)); // alice led until the deadline
+        assertEq(b.reignOf(c, bob), 0);
+    }
+
+    /// leading twice adds up
+    function test_Reign_LeadingTwiceAddsUp() public {
+        _reignParams();
+        uint256 t0 = block.timestamp;
+        uint256 c = _case();
+        _verdictAt(_file(c, alice, B1), true, t0 + 1 hours);
+        _verdictAt(_file(c, bob, B2), true, t0 + 3 hours);
+        _verdictAt(_file(c, alice, "Alice strikes back"), true, t0 + 4 hours);
+        vm.warp(t0 + 1 days);
+        b.settle(c);
+        assertEq(b.reignOf(c, alice), 2 hours + 20 hours);
+        assertEq(b.reignOf(c, bob), 1 hours);
+    }
+
+    // ------------------------------------------------------------ briefs filed for their author (paid elsewhere)
+
+    uint256 constant DAN_KEY = 0xDA;
+
+    function _relaySig(uint256 pk, uint256 c, string memory words, uint256 deadline) internal view returns (bytes memory) {
+        string memory m = jury.relayMessage(c, words, vm.addr(pk), deadline);
+        (uint8 v, bytes32 r, bytes32 s_) = vm.sign(pk, MessageHashUtils.toEthSignedMessageHash(bytes(m)));
+        return abi.encodePacked(r, s_, v);
+    }
+
+    /// the author signs; the relayer (keeper) pays: the brief is the author's, the relayer's IMD pays the fee
+    function test_Relay_ARelayerFilesASignedBriefForItsAuthor() public {
+        address dan = vm.addr(DAN_KEY); // no IMD, no approval: pays on another chain
+        uint256 c = _case();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _relaySig(DAN_KEY, c, B1, deadline);
+        assertEq(
+            jury.relayMessage(c, B1, dan, deadline),
+            string.concat(
+                "File this brief on briefs.fun\nCase: ", vm.toString(c), "\nAuthor: ", vm.toLowercase(vm.toString(dan)),
+                "\nValid until (unix time): ", vm.toString(deadline),
+                "\nCourt: ", vm.toLowercase(vm.toString(address(b))), " on chain ", vm.toString(block.chainid), "\n\n", B1
+            )
+        );
+        uint256 before = imd.balanceOf(alice);
+        vm.prank(alice); // alice relays
+        uint256 id = b.fileBriefFor(c, B1, dan, deadline, sig);
+        assertEq(b.getBrief(id).author, dan);
+        assertEq(imd.balanceOf(alice), before - FEE);
+        assertEq(imd.balanceOf(dan), 0);
+        // once only
+        vm.prank(alice);
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        b.fileBriefFor(c, B1, dan, deadline, sig);
+        // dan takes the lead and the pot, though he never paid here
+        _judge(id, true);
+        vm.warp(b.getCase(c).endsAt);
+        uint256 pot = b.getCase(c).pot;
+        b.settle(c);
+        assertEq(imd.balanceOf(dan), pot);
+    }
+
+    function test_Relay_OnlyTheSignedBriefForTheSignedCaseInTime() public {
+        address dan = vm.addr(DAN_KEY);
+        uint256 c = _case();
+        uint256 c2 = _case();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _relaySig(DAN_KEY, c, B1, deadline);
+        vm.startPrank(alice);
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        b.fileBriefFor(c, B2, dan, deadline, sig); // other words
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        b.fileBriefFor(c2, B1, dan, deadline, sig); // other case
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        b.fileBriefFor(c, B1, bob, deadline, sig); // credited to someone else
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        b.fileBriefFor(c, B1, dan, deadline + 1, sig); // stretched deadline
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        b.fileBriefFor(c, B1, dan, deadline, hex"1234"); // junk
+        vm.stopPrank();
+        // another wallet signing the very same words, case and deadline files its own brief, and doesn't use up dan's
+        uint256 eveKey = 0xE7E;
+        bytes memory eveSig = _relaySig(eveKey, c, B1, deadline);
+        vm.prank(alice);
+        b.fileBriefFor(c, B1, vm.addr(eveKey), deadline, eveSig);
+        vm.prank(alice);
+        uint256 mine = b.fileBriefFor(c, B1, dan, deadline, sig);
+        assertEq(b.getBrief(mine).author, dan);
+        vm.warp(deadline + 1);
+        bytes memory late = _relaySig(DAN_KEY, c, B2, deadline);
+        vm.prank(alice);
+        vm.expectRevert(BriefsJury.Expired.selector);
+        b.fileBriefFor(c, B2, dan, deadline, late);
+        // only Briefs may spend a signature
+        bytes memory fresh = _relaySig(DAN_KEY, c, B1, deadline + 1 hours);
+        vm.expectRevert(BriefsJury.WrongCourt.selector);
+        jury.useRelay(c, B1, dan, deadline + 1 hours, fresh);
+    }
+
+    /// a refund (jury split here) goes to the author, not the relayer
+    function test_Relay_RefundsGoToTheAuthor() public {
+        address dan = vm.addr(DAN_KEY);
+        uint256 c = _case();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _relaySig(DAN_KEY, c, B1, deadline);
+        vm.prank(alice);
+        uint256 id = b.fileBriefFor(c, B1, dan, deadline, sig);
+        vm.warp(block.timestamp + 4 minutes + 2 minutes + 1);
+        uint256 aliceBefore = imd.balanceOf(alice);
+        b.mistrial(c);
+        assertEq(imd.balanceOf(dan), FEE - ORACLE_FEE);
+        assertEq(imd.balanceOf(alice), aliceBefore);
+        assertEq(uint8(b.getBrief(id).status), uint8(Briefs.BriefStatus.Mistrial));
+    }
+
+    // ------------------------------------------------------------ who sets the share and the final cap
+
+    /// the owner's settings: a creator must ask for exactly them (they may have changed since the creator looked)
+    function test_Settings_OwnerModeTakesTheOwnersNumbersOnly() public {
+        _reignParams();
+        inReign = 5_000;
+        vm.prank(creator);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+        inReign = 6_000;
+        inCap = 1 hours;
+        vm.prank(creator);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+        inCap = 0;
+        uint256 c = _case();
+        assertEq(b.getCase(c).reignBps, 6_000);
+        assertEq(b.getCase(c).finalEnd, 0);
+    }
+
+    function test_Settings_CreatorsPickTheShareWhenAllowed() public {
+        Briefs.Params memory p = _params();
+        p.creatorSetsReign = true;
+        p.reignBps = 6_000; // ignored in this mode
+        b.setParams(p);
+        inReign = 2_500;
+        uint256 c = _case();
+        assertEq(b.getCase(c).reignBps, 2_500);
+        inReign = 0;
+        assertEq(b.getCase(_case()).reignBps, 0); // all to the final leader
+        inReign = 9_001; // the final leader always keeps 10%
+        vm.prank(creator);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+    }
+
+    /// the owner turns on a final limit: overtime stops 15 minutes after the first deadline
+    function test_Settings_TheFinalCapStopsOvertime() public {
+        Briefs.Params memory p = _params();
+        p.reignBps = 6_000;
+        p.overtime = 10 minutes;
+        p.finalCap = 15 minutes;
+        b.setParams(p);
+        inReign = 6_000;
+        inCap = 15 minutes;
+        inOvertime = 10 minutes;
+        uint256 c = _case();
+        uint256 end0 = b.getCase(c).endsAt;
+        assertEq(b.getCase(c).finalEnd, end0 + 15 minutes);
+        _verdictAt(_file(c, alice, B1), true, end0 - 1 minutes);
+        assertEq(b.getCase(c).endsAt, end0 + 9 minutes);
+        _verdictAt(_file(c, bob, B2), true, end0 + 8 minutes);
+        assertEq(b.getCase(c).endsAt, end0 + 15 minutes); // not +18: capped
+        _verdictAt(_file(c, carol, "A third brief"), true, end0 + 14 minutes);
+        assertEq(b.getCase(c).endsAt, end0 + 15 minutes); // stays at the cap
+        vm.warp(end0 + 15 minutes);
+        vm.prank(alice);
+        vm.expectRevert(Briefs.EntriesClosed.selector);
+        b.fileBrief(c, "Too late");
+        b.settle(c);
+        assertEq(b.getCase(c).winner, carol);
+    }
+
+    /// creators pick the final cap (0: none) when the owner allows it
+    function test_Settings_CreatorsPickTheFinalCapWhenAllowed() public {
+        Briefs.Params memory p = _params();
+        p.overtime = 10 minutes;
+        p.finalCap = 1 hours; // ignored in this mode
+        p.creatorSetsCap = true;
+        b.setParams(p);
+        inCap = 5 minutes;
+        inOvertime = 10 minutes;
+        uint256 c = _case();
+        uint256 end0 = b.getCase(c).endsAt;
+        _verdictAt(_file(c, alice, B1), true, end0 - 1 minutes);
+        assertEq(b.getCase(c).endsAt, end0 + 5 minutes);
+        inCap = 0;
+        uint256 c2 = _case();
+        assertEq(b.getCase(c2).finalEnd, 0);
+        inCap = 365 days + 1;
+        vm.prank(creator);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+    }
+
+    function test_Settings_Bounds() public {
+        Briefs.Params memory p = _params();
+        p.finalCap = 365 days + 1;
+        vm.expectRevert(Briefs.BadParams.selector);
+        b.setParams(p);
+        p.finalCap = 365 days;
+        b.setParams(p);
+        vm.prank(alice);
+        vm.expectRevert();
+        b.setParams(p);
+    }
+
+    /// a leader can't stretch the case to dilute what earlier leaders earned: time stops at the first deadline
+    function test_Reign_OvertimeEarnsNoTimeAndDilutesNobody() public {
+        _reignParams();
+        uint256 c = _case();
+        Briefs.Case memory k0 = b.getCase(c);
+        uint256 end0 = k0.endsAt;
+        _verdictAt(_file(c, alice, B1), true, k0.createdAt + 1 hours);
+        _verdictAt(_file(c, bob, B2), true, end0 - 5 minutes);
+        for (uint256 i; i < 30; i++) { // bob keeps beating himself in overtime
+            uint256 id = _file(c, bob, string.concat("Bob again ", vm.toString(i)));
+            _verdictAt(id, true, b.getCase(c).endsAt - 1);
+        }
+        assertGt(b.getCase(c).endsAt, end0 + 4 hours);
+        vm.warp(b.getCase(c).endsAt);
+        b.settle(c);
+        Briefs.Case memory k = b.getCase(c);
+        assertEq(b.reignOf(c, alice), end0 - 5 minutes - (k0.createdAt + 1 hours));
+        assertEq(b.reignOf(c, bob), 5 minutes);
+        assertEq(k.reignTotal, end0 - (k0.createdAt + 1 hours));
+        // the pool is measured against the first deadline, whatever overtime added
+        uint256 pot = SEED + 32 * TO_POT;
+        assertEq(k.reignPool, (pot * 6_000 * k.reignTotal) / (10_000 * (end0 - k0.createdAt)));
+    }
+
+    /// a COOKED during overtime makes the final leader and pushes the deadline, but earns no time
+    function test_Reign_ALeadTakenInOvertimeEarnsNoTime() public {
+        _reignParams();
+        uint256 c = _case();
+        uint256 end0 = b.getCase(c).endsAt;
+        _verdictAt(_file(c, alice, B1), true, end0 - 2 minutes); // pushes to end0 + 8 min
+        _verdictAt(_file(c, bob, B2), true, end0 + 3 minutes); // in overtime
+        assertEq(b.getCase(c).endsAt, end0 + 13 minutes);
+        vm.warp(end0 + 13 minutes);
+        b.settle(c);
+        assertEq(b.getCase(c).winner, bob);
+        assertEq(b.reignOf(c, alice), 2 minutes);
+        assertEq(b.reignOf(c, bob), 0);
+    }
+
+    /// overtime is pinned like the share and the limit: the owner can't change it under a pending openCase
+    function test_Settings_OvertimeIsWhatTheCreatorSaw() public {
+        _reignParams();
+        inOvertime = 1 hours;
+        vm.prank(creator);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+    }
+
+    /// a relayer that refunds does it through the jury: the chain records what was paid back, and the message can
+    /// never be filed after; a filed one can't be refunded
+    function test_Relay_ARefundedSignatureCanNeverBeFiled() public {
+        address dan = vm.addr(DAN_KEY);
+        uint256 c = _case();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _relaySig(DAN_KEY, c, B1, deadline);
+        bytes32 h = MessageHashUtils.toEthSignedMessageHash(bytes(jury.relayMessage(c, B1, dan, deadline)));
+        vm.prank(carol);
+        imd.approve(address(jury), type(uint256).max);
+        vm.prank(carol); // anyone holding the signature, paying the refund
+        jury.refundRelay(c, B1, dan, deadline, sig, 2 ether);
+        assertEq(jury.relayed(h), 2);
+        assertEq(jury.refunded(h), 2 ether);
+        assertEq(imd.balanceOf(dan), 2 ether);
+        vm.prank(carol); // a top-up adds to the record
+        jury.refundRelay(c, B1, dan, deadline, sig, 1 ether);
+        assertEq(jury.refunded(h), 3 ether);
+        vm.prank(alice);
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        b.fileBriefFor(c, B1, dan, deadline, sig);
+        // filed first: then it can't be refunded
+        bytes memory sig2 = _relaySig(DAN_KEY, c, B2, deadline);
+        vm.prank(alice);
+        b.fileBriefFor(c, B2, dan, deadline, sig2);
+        vm.prank(carol);
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        jury.refundRelay(c, B2, dan, deadline, sig2, 1 ether);
+        // a forged signature refunds nobody, and the jury never holds IMD
+        bytes memory forged = _relaySig(0xBAD, c, "Something else", deadline);
+        vm.prank(carol);
+        vm.expectRevert(BriefsJury.BadSignature.selector);
+        jury.refundRelay(c, "Something else", dan, deadline, forged, 1 ether);
+        assertEq(imd.balanceOf(address(jury)), 0);
+    }
+
+    // random cases (share, overtime, limit, who files, when, verdicts, mistrials): seconds add up to the total, claims
+    // never pass the pool, the deadline never passes its limit, and the contract holds exactly what it owes
+    // (from the v2 audit, part A)
+    address[5] who5;
+
+    function testFuzz_Reign_TheBooksAlwaysBalance(uint256 seed) public {
+        Briefs.Params memory p = _params();
+        p.overtime = uint32(bound(seed, 0, 1 hours));
+        p.creatorSetsReign = true;
+        p.creatorSetsCap = true;
+        b.setParams(p);
+        inOvertime = p.overtime;
+        inReign = uint16(uint256(keccak256(abi.encode(seed, "r"))) % 9_001);
+        inCap = uint32(uint256(keccak256(abi.encode(seed, "c"))) % 3 hours);
+        uint256 c = _case();
+        who5 = [creator, alice, bob, carol, keeper];
+        vm.prank(keeper);
+        imd.approve(address(b), type(uint256).max);
+        imd.transfer(keeper, 1_000 ether);
+
+        uint256 steps = 1 + uint256(keccak256(abi.encode(seed, "n"))) % 14;
+        for (uint256 i; i < steps; i++) {
+            uint256 r = uint256(keccak256(abi.encode(seed, i)));
+            Briefs.Case memory k = b.getCase(c);
+            if (k.status != Briefs.CaseStatus.Open) break;
+            // jump: often small (end-game), sometimes hours
+            uint256 dt = r % 4 == 0 ? 30 + (r >> 8) % 10 hours : 30 + (r >> 8) % 15 minutes;
+            if (block.timestamp + 1 < k.endsAt) {
+                uint256 near = (r >> 40) % 3 == 0 ? k.endsAt - 1 - (r >> 48) % 20 minutes : block.timestamp;
+                if (near > block.timestamp) vm.warp(near);
+                uint256 id = _file(c, who5[(r >> 16) % 5], string.concat("brief ", vm.toString(i)));
+                if (b.getCase(c).hearing != id) break;
+                uint256 kind = (r >> 24) % 5;
+                if (kind == 0) {
+                    vm.warp(block.timestamp + 6 minutes + 1);
+                    b.mistrial(c);
+                } else {
+                    _verdictAt(id, kind != 1, block.timestamp + dt);
+                }
+            } else {
+                break;
+            }
+        }
+        Briefs.Case memory k2 = b.getCase(c);
+        if (k2.status == Briefs.CaseStatus.Open) {
+            if (k2.hearing != 0) _verdictAt(k2.hearing, true, block.timestamp + 31);
+            if (block.timestamp < b.getCase(c).endsAt) vm.warp(b.getCase(c).endsAt);
+            if (b.getCase(c).status == Briefs.CaseStatus.Open) b.settle(c);
+        }
+        k2 = b.getCase(c);
+        uint256 sum;
+        assertLe(k2.firstReign == 0 ? 0 : k2.reignEnd - k2.firstReign, k2.reignEnd - k2.createdAt);
+        for (uint256 j; j < 5; j++) sum += b.reignOf(c, who5[j]);
+        assertEq(sum, k2.reignTotal, "seconds add up");
+        if (k2.finalEnd != 0) assertLe(k2.endsAt, k2.finalEnd);
+        for (uint256 j; j < 5; j++) {
+            if (b.reignOf(c, who5[j]) != 0) b.claimReign(c, who5[j]);
+        }
+        k2 = b.getCase(c);
+        assertLe(k2.reignPaid, k2.reignPool);
+        assertLt(k2.reignPool - k2.reignPaid, 5);
+        assertEq(
+            imd.balanceOf(address(b)),
+            b.platformOwed() + k2.creatorOwed + (k2.reignPool - k2.reignPaid) + b.unpaidTotal(),
+            "solvent to the wei"
+        );
+    }
+
+    // ------------------------------------------------------------ a case's language and brief limit
+
+    /// an English case with a 100-character limit: plain ASCII only, at most 100 characters, and the jury is told
+    function test_Lang_AnEnglishCaseTakesShortEnglishBriefsOnly() public {
+        inLang = 1;
+        inMax = 100;
+        uint256 c = _case();
+        assertEq(b.langOf(c), 1);
+        assertEq(b.getCase(c).maxBrief, 100);
+        vm.startPrank(alice);
+        vm.expectRevert(BriefsText.NotEnglish.selector);
+        b.fileBrief(c, unicode"Драконы не пользуются банками");
+        vm.expectRevert(BriefsText.NotEnglish.selector);
+        b.fileBrief(c, unicode"A dragon walks into a café");
+        vm.expectRevert(BriefsText.BadText.selector);
+        b.fileBrief(c, string(_repeat("a", 101)));
+        uint256 id = b.fileBrief(c, string(_repeat("a", 100)));
+        vm.stopPrank();
+        string memory q = jury.question(id, b.getCase(c).precedent);
+        assertTrue(_contains(q, unicode"» Answers must be written in English. The current leader's answer: «"));
+        _judge(id, true); // the attestation is checked against the English question
+        assertEq(b.getCase(c).precedent, id);
+    }
+
+    /// any language (the default) asks exactly the question v1 asked, and takes any script
+    function test_Lang_AnyLanguageKeepsTheQuestionAsItWas() public {
+        uint256 c = _case();
+        assertEq(b.langOf(c), 0);
+        uint256 id = _file(c, alice, unicode"Драконы не пользуются банками");
+        string memory q = jury.question(id, b.getCase(c).precedent);
+        assertFalse(_contains(q, "English"));
+        assertTrue(_contains(q, unicode"» The current leader's answer: «"));
+    }
+
+    function test_Lang_ALimitComesWithALanguageWithinBounds() public {
+        inMax = 100; // a limit without a language
+        vm.prank(creator);
+        vm.expectRevert(BriefsText.BadText.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+        inLang = 1;
+        inMax = 19; // under MIN_LIMIT
+        vm.prank(creator);
+        vm.expectRevert(BriefsText.BadText.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+        inMax = 501; // over the court's maxBrief (500 here)
+        vm.prank(creator);
+        vm.expectRevert(BriefsText.BadText.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+        inMax = 0; // English with the court's limit
+        assertEq(b.getCase(_case()).maxBrief, 500);
+        inLang = 2; // no such language yet
+        vm.prank(creator);
+        vm.expectRevert(BriefsText.NotEnglish.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+    }
+
+    function test_Lang_TheOpeningBriefAndRelayedBriefsFollowTheLanguage() public {
+        inLang = 1;
+        Briefs.CaseInput memory x = _input(uint64(block.timestamp + 1 days));
+        x.opening = unicode"Драконы";
+        vm.prank(creator);
+        vm.expectRevert(BriefsText.NotEnglish.selector);
+        b.openCase(x);
+        uint256 c = _case();
+        address dan = vm.addr(DAN_KEY);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _relaySig(DAN_KEY, c, unicode"Ça va", deadline);
+        vm.prank(alice);
+        vm.expectRevert(BriefsText.NotEnglish.selector);
+        b.fileBriefFor(c, unicode"Ça va", dan, deadline, sig);
+    }
+
+    function _contains(string memory hay, string memory needle) internal pure returns (bool) {
+        bytes memory h = bytes(hay);
+        bytes memory n = bytes(needle);
+        for (uint256 i; i + n.length <= h.length; i++) {
+            bool ok = true;
+            for (uint256 j; j < n.length && ok; j++) ok = h[i + j] == n[j];
+            if (ok) return true;
+        }
+        return false;
     }
 }

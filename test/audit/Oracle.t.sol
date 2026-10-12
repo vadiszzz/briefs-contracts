@@ -83,7 +83,7 @@ contract OracleAuditTest is Test {
         return Briefs.Params({
             minSeed: 10 ether, minFee: 1 ether, maxOracleFee: 0.9 ether, creatorBps: 1_500, platformBps: 500,
             panelSize: 11, quorum: 6, answerTimeout: 4 minutes, caseFee: 2 ether,
-            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: 500
+            minDuration: 10 minutes, maxDuration: 90 days, maxBrief: 500, reignBps: 0, overtime: 0, finalCap: 0, creatorSetsReign: false, creatorSetsCap: false
         });
     }
 
@@ -103,7 +103,7 @@ contract OracleAuditTest is Test {
         c = g.openCase(
             Briefs.CaseInput({
                 title: "Dragon Jokes", task: TASK, standard: STANDARD, opening: OPENING, avatar: 1, seed: 100 ether,
-                fee: 5 ether, endsAt: uint64(block.timestamp + 1 days), minHold: 0, oracleId: 0
+                fee: 5 ether, endsAt: uint64(block.timestamp + 1 days), minHold: 0, oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
             })
         );
     }
@@ -388,7 +388,7 @@ contract OracleAuditTest is Test {
         assertEq(vm.parseJsonUint(input, ".quorum"), 6);
         assertEq(vm.parseJsonUint(input, ".panelSize"), 11);
         assertEq(vm.parseJsonAddress(input, ".consumer.verifyingContract"), address(0xBEEF));
-        assertEq(vm.parseJsonString(input, ".question"), text.question(TASK, STANDARD, OPENING, string(t), address(0xBEEF), 7));
+        assertEq(vm.parseJsonString(input, ".question"), text.question(TASK, STANDARD, OPENING, string(t), address(0xBEEF), 7, 0));
     }
 
     function test_V_ForbiddenBytesRejected() public {
@@ -437,7 +437,7 @@ contract OracleAuditTest is Test {
         text.check(task, 10, 240, 240);
         text.check(standard, 5, 160, 160);
         string memory q =
-            text.question(string(task), string(standard), string(brief), string(brief), address(type(uint160).max), type(uint64).max);
+            text.question(string(task), string(standard), string(brief), string(brief), address(type(uint160).max), type(uint64).max, 1);
         console.log("longest question, bytes:", bytes(q).length);
         assertLe(bytes(q).length, 2_000);
     }

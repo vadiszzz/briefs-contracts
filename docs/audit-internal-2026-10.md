@@ -151,3 +151,55 @@ every paying call, and per-player books rebuilt from brief statuses) held over 2
 | 5 | Info | A text made only of combining marks passes the minimum length | Accepted: no funds or JSON impact; the author pays for a brief the jury sees as empty |
 | 6 | Info | An unused local in `_hearNext` | Used again by fix 2 |
 
+
+## Seventh review: v2 (time in the lead, overtime, pay with IMD on Ethereum), October 2026
+
+Scope: everything v2 changed since the audited mainnet code (`2f28e22`): time in the lead, overtime and its limit,
+the owner and creator modes, `fileBriefFor` and the relay messages in BriefsJury, the backend relayer
+(`server/src/relay.mjs`), the keeper, index and API changes, and the site's flows. Run as five independent audits
+(money and economics; signatures and relayed filing; liveness and gas; the relayer and keeper; the site), each with
+a PoC for every finding, then a sixth pass that re-checked every fix and found three more relayer issues, also fixed.
+Suite after the fixes: 155 Foundry tests (including a 512-run fuzz of the time-in-the-lead books and the funds
+invariant with relayed filings and refunds), 76 server tests (11 for the relayer on two chains), 46 site tests.
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 1 | Medium | Unlimited overtime let the final leader stretch a case and dilute what earlier leaders had earned for their time in the lead (a 24 h case: one honest leader's share fell from 57k to 29k IMD of a 100k pot, for about 1.4 IMD per extension) | Time in the lead and the pool's denominator stop at the case's first deadline (`Case.reignEnd`): overtime decides the final leader but earns nobody time. *Tests: `test_Reign_OvertimeEarnsNoTimeAndDilutesNobody`, `test_Reign_ALeadTakenInOvertimeEarnsNoTime`, `testFuzz_Reign_TheBooksAlwaysBalance`* |
+| 2 | Medium | Relayer: a refund could be paid again (a receipt missed by a lagging RPC; a database restored from a copy taken before the refund), or matched to another refund of the same amount | Refunds go through the jury (`refundRelay`): it pays the author and adds to an on-chain `refunded` record in one step, and the relayer only pays what that record says is still owed. *Tests: relay "refunds follow the chain's record", `test_Relay_ARefundedSignatureCanNeverBeFiled`* |
+| 3 | Medium | Relayer: a payment wasn't tied to a brief, so after a lost database an old payment (or any transfer to the pay-to address) could buy another brief or refund; one signature with two payments filed once and kept the second | The payment's calldata ends with the signed message's hash and must come from the author; jobs are unique by message; the jury's record (filed or refunded) is checked before anything is queued. *Test: relay "a payment counts only for the message it names"* |
+| 4 | Medium | Relayer: a filing and a refund for the same payment were both possible (a receipt lost while the filing was pending, or someone filing the signed brief first) | Before any refund the jury's record is read: a filed message is never refunded. Our transactions are signed and saved before they are sent and replaced with the same nonce. *Tests: relay "someone else files the signed brief first", "a filing that doesn't get mined is replaced"* |
+| 5 | Medium | A paid player could end up with no job: a sped-up payment (new hash), a closed tab, a late POST past the signature's deadline, or the wallet erroring after sending | A payment is found again by its message hash; the site keeps the signed brief before paying and hands it over until the relayer has it; a late deadline is accepted (the job then refunds); every payment to the pay-to address is listed and one with no job is alerted. *Tests: relay "a sped-up payment … still files", "a payment to the relay that never became a brief is listed"* |
+| 6 | Medium | Site: once paid, an error re-enabled the button and invited a second payment | After paying, the site never asks for another payment while one for that case is pending; it shows the payment's status on the case page instead |
+| 7 | Medium | Site: payout texts still said the winner takes 100% (claim button, cards, gate, docs), overtime wasn't explained when the share is 0, and the Ethereum section sat in the demo docs | Texts follow the case's numbers (the claim button shows the pot less the shares for time in the lead); overtime shows on its own; the section moved to the live wallet docs |
+| 8 | Low | `overtime` wasn't pinned at `openCase` like the share and the limit | `CaseInput.overtime` must equal the current setting (`SettingsChanged`). *Test: `test_Settings_OvertimeIsWhatTheCreatorSaw`* |
+| 9 | Low | A relay signature stayed usable after a failed relay, so anyone holding it could file the brief later | A refund marks the message refunded, so it can never be filed |
+| 10 | Low | Relayer: a job that kept failing was parked as failed with the player's money, including while the relayer was short of IMD | Each state counts its own tries; a filing that can't go through is refunded; filing and refunding wait (without counting) while the relayer is short, and the alert says so |
+| 11 | Low | Relayer: few Ethereum confirmations, no chain check, unbounded fee bumps, words visible before filing, signatures with v = 0/1 refused on chain | 12 confirmations by default and a chain id check; at most 5 replacements; words hidden until filed; v normalized; signatures recovered locally (ECDSA only, as the contract) |
+| 12 | Low | Keeper retried `claimReign` forever for a leader whose time came to 0 seconds | It reads `reignOf`/`reignClaimed` first and skips those |
+| 13 | Low | Site: the shown settings could differ from the ones sent to `openCase`; a decimal comma fell back to the default share | The settings the creator saw are sent; a comma is read as a decimal point; `SettingsChanged` has a friendly message |
+| 14 | Low | Leaders were dated by when a COOKED was delivered, not when the jury answered (a slow relay gives the sitting leader a few extra seconds) | Accepted: the keeper delivers within seconds, and the time now stops at the first deadline |
+| 15 | Info | Overtime is still unlimited by default (the owner's choice): someone who keeps winning in the last minutes can delay settlement, paying a fee each time, but no longer gains time in the lead | `finalCap` (owner or creator) bounds it when wanted |
+| 16 | Info | Smart-contract wallets can't pay on Ethereum (personal_sign recovery is ECDSA only) | The site refuses them before signing; they can still file with IMD on Robinhood Chain |
+| 17 | Info | `check-mainnet.mjs` left held payments out of what Briefs owes; a resumed deploy could reuse an older BriefsText | `unpaidTotal` is counted; the deploy replaces a BriefsText without `checkCase` |
+
+Checked and fine, with tests: seconds add up to the total in every path (COOKED before and after the deadline,
+mistrials and skips between, two COOKED in the same second, leading twice, settlement in the same transaction as the
+last verdict); claims never exceed the pool and the contract holds exactly what it owes (fuzzed); no division by
+zero or overflow; `SettingsChanged` in both modes; replay across chains, courts and juries; signature malleability;
+the message can't be read two ways; holders-only checked on the author; `checkCase` limits equal the old ones
+(differential fuzz); no stall can be faked on the new paths (gas swept around the threshold); worst cases measured
+at about 5.35M for `fileBriefFor` and 6.47M for a skip-heavy `fulfill` at a 4M `hearingGas`, under the 7M the site
+and keeper send. Briefs is 24,323 bytes, 253 under the limit; new code should go into BriefsJury or BriefsText.
+
+### Added after the seventh review (not yet reviewed)
+
+- **A case's brief language and limit.** `CaseInput.lang` (0 any, 1 English; `Briefs.langOf`) and `CaseInput.maxBrief`
+  (0: the court's `maxBrief`; otherwise 20 up to it, and only with a language). English means plain ASCII, so a byte is a
+  character and the limit is fair whatever the script. `BriefsText.checkCase` validates the language and the limit and
+  returns the case's limit; `BriefsText.checkBrief` applies them to every brief, the opening one and relayed ones
+  included (`NotEnglish`). The question tells the jury ("Answers must be written in English.") for an English case
+  only; a case open to any language asks exactly the question v1 asked, so its questionHash is unchanged.
+- To keep Briefs under 24 KB: `reignClaimed` is gone (`claimReign` sets `reignOf` to 0 once paid; `ReignPaid` keeps the
+  seconds), and the optimizer runs 100 times instead of 200 (a little more gas per call, well under the 7M floor).
+- Tests: `test_Lang_*` (4), and the e2e "an English case" on anvil (the jury's signed answer for the English question
+  lands).

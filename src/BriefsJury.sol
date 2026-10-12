@@ -3,6 +3,10 @@ pragma solidity 0.8.30;
 
 import {Ownable, Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ImdOracle} from "./ImdOracle.sol";
 import {IImdRequester} from "./interfaces/IImdRequester.sol";
 import {BriefsText} from "./BriefsText.sol";
@@ -30,6 +34,8 @@ interface IBriefsCourt {
     function standardOf(uint256 caseId) external view returns (string memory);
     function briefText(uint256 briefId) external view returns (string memory);
     function briefOfRequest(bytes32 requestId) external view returns (uint256);
+    function imd() external view returns (IERC20);
+    function langOf(uint256 caseId) external view returns (uint8);
 }
 
 /// @title BriefsJury — everything Briefs says to and hears from the IMD oracle
@@ -68,6 +74,12 @@ contract BriefsJury is Ownable2Step {
     /// @notice whether that answer passed the cheap checks when it arrived (a true/false answer from the panel the
     ///         hearing ordered, issued within its window): only such an answer makes Briefs wait the long grace
     mapping(address => mapping(bytes32 => bool)) public landable;
+    /// @notice signed briefs (Briefs.fileBriefFor), by message hash: 0 unused, 1 filed, 2 refunded (refundRelay). A
+    ///         message is filed or refunded, never both
+    mapping(bytes32 => uint8) public relayed;
+    /// @notice IMD paid back to the author of a refunded message, in all (refundRelay)
+    mapping(bytes32 => uint256) public refunded;
+    event RelayRefunded(bytes32 indexed messageHash, address indexed author, uint256 amount);
 
     uint8 internal constant HEARING = 3; // Briefs.BriefStatus.Hearing
 
@@ -179,7 +191,7 @@ contract BriefsJury is Ownable2Step {
             court.briefText(briefId),
             address(this),
             briefId,
-            packed
+            packed | uint256(court.langOf(caseId)) << 240
         );
     }
 
@@ -187,7 +199,13 @@ contract BriefsJury is Ownable2Step {
     function question(uint256 briefId, uint256 precedentId) external view returns (string memory) {
         uint256 caseId = court.getBrief(briefId).caseId;
         return text.question(
-            court.taskOf(caseId), court.standardOf(caseId), court.briefText(precedentId), court.briefText(briefId), address(this), briefId
+            court.taskOf(caseId),
+            court.standardOf(caseId),
+            court.briefText(precedentId),
+            court.briefText(briefId),
+            address(this),
+            briefId,
+            court.langOf(caseId)
         );
     }
 
@@ -249,6 +267,70 @@ contract BriefsJury is Ownable2Step {
         return source != address(0) && landable[source][b.requestId];
     }
 
+    // ---------------------------------------------------------------- briefs filed for their author
+
+    /// @notice The plain-text message `author` signs (personal_sign, EIP-191, from any chain) so that someone else
+    ///         may file `words` in case `caseId` for them and pay the entry fee (Briefs.fileBriefFor). It names this
+    ///         court and its chain, so it is good here only, and once only.
+    function relayMessage(uint256 caseId, string calldata words, address author, uint256 deadline)
+        public
+        view
+        returns (string memory)
+    {
+        return string.concat(
+            "File this brief on briefs.fun\nCase: ",
+            Strings.toString(caseId),
+            "\nAuthor: ",
+            Strings.toHexString(author),
+            "\nValid until (unix time): ",
+            Strings.toString(deadline),
+            "\nCourt: ",
+            Strings.toHexString(address(court)),
+            " on chain ",
+            Strings.toString(block.chainid),
+            "\n\n",
+            words
+        );
+    }
+
+    /// @notice Briefs asks this before filing a brief for its author: the author signed exactly this brief for this
+    ///         case, the signature has not expired and was never used. Marks it filed.
+    function useRelay(uint256 caseId, string calldata words, address author, uint256 deadline, bytes calldata signature)
+        external
+    {
+        if (msg.sender != address(court)) revert WrongCourt();
+        if (block.timestamp > deadline) revert Expired();
+        relayed[_relayHash(caseId, words, author, deadline, signature, false)] = 1;
+    }
+
+    /// @notice Refund a signed brief that will not be filed: the caller pays `amount` IMD to its author, and the
+    ///         message can never be filed after that. A relayer that took the author's payment elsewhere refunds this
+    ///         way, so the chain keeps the record of what was paid back (`refunded`) and a refund is never paid twice
+    ///         by mistake. Anyone holding the signature may call it, again and again (adding to the refund), never
+    ///         once the brief is filed. Holds no IMD: it moves from the caller straight to the author.
+    function refundRelay(uint256 caseId, string calldata words, address author, uint256 deadline, bytes calldata signature, uint256 amount)
+        external
+    {
+        bytes32 h = _relayHash(caseId, words, author, deadline, signature, true);
+        relayed[h] = 2;
+        refunded[h] += amount;
+        emit RelayRefunded(h, author, amount);
+        SafeERC20.safeTransferFrom(court.imd(), msg.sender, author, amount);
+    }
+
+    /// @dev The message hash, once `author` is shown to have signed it and it is unused (or, for a refund, not filed).
+    ///      The message names the author, so another wallet signing the same words can't use up this one's filing.
+    function _relayHash(uint256 caseId, string calldata words, address author, uint256 deadline, bytes calldata signature, bool refund)
+        private
+        view
+        returns (bytes32 h)
+    {
+        h = MessageHashUtils.toEthSignedMessageHash(bytes(relayMessage(caseId, words, author, deadline)));
+        (address signer, ECDSA.RecoverError e,) = ECDSA.tryRecover(h, signature);
+        uint8 state = relayed[h];
+        if (e != ECDSA.RecoverError.NoError || signer != author || state == 1 || (!refund && state != 0)) revert BadSignature();
+    }
+
     /// @notice The verdict an attestation gives for the running hearing of `briefId`, after every check: issued
     ///         within the hearing's window, the panel it ordered, the hearing's own question, delivered by the setup's
     ///         Intake (when it has one), signed by the setup's attester. Reverts on any mismatch.
@@ -289,7 +371,7 @@ contract BriefsJury is Ownable2Step {
             court.briefText(briefId),
             address(this),
             briefId,
-            chainFromTo
+            chainFromTo | uint256(court.langOf(caseId)) << 240
         );
     }
 

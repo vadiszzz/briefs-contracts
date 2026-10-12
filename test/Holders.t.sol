@@ -71,7 +71,7 @@ contract HoldersTest is Test {
             caseFee: 2 ether,
             minDuration: 10 minutes,
             maxDuration: 90 days,
-            maxBrief: 500
+            maxBrief: 500, reignBps: 0, overtime: 0, finalCap: 0, creatorSetsReign: false, creatorSetsCap: false
         });
     }
 
@@ -89,7 +89,7 @@ contract HoldersTest is Test {
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + dur),
                 minHold: minHold,
-                oracleId: 0
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
             })
         );
     }
@@ -140,7 +140,7 @@ contract HoldersTest is Test {
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + 1 days),
                 minHold: MIN_HOLD,
-                oracleId: 0
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0
             })
         );
         assertEq(b.getCase(_open(MIN_HOLD, 1 days)).creator, address(this));
@@ -281,8 +281,8 @@ contract HoldersTest is Test {
     function test_Settings_LongestQuestionFitsImd() public {
         BriefsText t = new BriefsText();
         string memory q = t.question(
-            _words(240), _words(160), _words(600), _words(600), address(type(uint160).max), type(uint64).max
-        );
+            _words(240), _words(160), _words(600), _words(600), address(type(uint160).max), type(uint64).max, 1
+        ); // with the English line, the longer one
         assertLe(bytes(q).length, 2_000); // ASCII here, so bytes bound characters; IMD takes up to 2,000
     }
 }

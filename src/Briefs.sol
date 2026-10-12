@@ -7,7 +7,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Ownable, Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ImdOracle} from "./ImdOracle.sol";
 import {IImdRequester} from "./interfaces/IImdRequester.sol";
-import {IRewardsSink} from "./interfaces/IRewardsSink.sol";
 import {BriefsText} from "./BriefsText.sol";
 import {BriefsJury} from "./BriefsJury.sol";
 
@@ -29,9 +28,8 @@ import {BriefsJury} from "./BriefsJury.sol";
 ///         platform, the rest into the pot. A mistrial hands the rest back to the brief's author; a brief that is
 ///         never heard gets its whole fee back. The pot is never used to pay the jury.
 ///
-///         Platform share: kept in the contract and withdrawn to the treasury by anyone. Later a rewards sink can
-///         receive up to half of it (MAX_REWARDS_BPS), set only after a public CONFIG_DELAY and only for fees
-///         accrued after the change. Neither the owner nor the sink can touch pots or creator earnings.
+///         Platform share: kept in the contract and withdrawn to the treasury by anyone. The owner can't touch pots,
+///         escrowed fees, creator earnings or shares for time as the leader.
 ///
 ///         The owner tunes numbers within hard bounds (new cases only: a case fixes its split, jury, panel,
 ///         answer window and brief length when it opens; its jury reserve can only be lifted, see raiseReserve), pauses new cases (entries, hearings and payouts keep
@@ -40,30 +38,32 @@ import {BriefsJury} from "./BriefsJury.sol";
 ///         The owner can open holders-only cases (minHold > 0): only addresses holding at least that much of
 ///         holderToken may file briefs in them. Token and amount are fixed when the case opens.
 ///         Oracle setups and answer checks live in BriefsJury (new setups only after a public delay).
+///
+///         The pot: reignBps of it is shared by time as the leader (from the first challenger to take the lead until
+///         the deadline), the rest goes to the final leader. A new leader late in a case pushes its deadline
+///         (overtime), up to a final limit when the case has one. The owner sets the share and the limit, or lets
+///         each creator pick them; either way a case fixes them when it opens.
+///
+///         Anyone may file a brief for its author with the author's signature (fileBriefFor), paying the fee: so a
+///         relayer can take the payment somewhere else (IMD on Ethereum, say) and file here for the player.
 contract Briefs is ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------- constants
 
     uint256 public constant BPS = 10_000;
-    uint256 public constant CONFIG_DELAY = 2 days;
-    uint256 public constant MAX_REWARDS_BPS = 5_000; // at most half of the platform's share ever leaves to a sink
-    uint256 public constant MIN_TITLE = 3;
-    uint256 public constant MAX_TITLE = 48;
-    // the task, the standard and the briefs go to the jury, so their limits count UTF-8 bytes: IMD takes questions
-    // up to 2,000 characters, and a byte is never less than a character however IMD counts them (code points, UTF-16
-    // units or bytes). A question carries the task, the standard, two briefs and under 400 bytes of wording, so a
-    // brief can never be longer than 600 bytes. Titles never reach the jury and count characters.
-    uint256 public constant MIN_TASK = 10;
-    uint256 public constant MAX_TASK = 240;
-    uint256 public constant MIN_STANDARD = 5;
-    uint256 public constant MAX_STANDARD = 160;
+    // the title, task and standard limits are in BriefsText (MIN_TITLE … MAX_STANDARD). The briefs go to the jury, so
+    // their limit counts UTF-8 bytes: IMD takes questions up to 2,000 characters, and a byte is never less than a
+    // character however IMD counts them (code points, UTF-16 units or bytes). A question carries the task, the
+    // standard, two briefs and under 400 bytes of wording, so a brief can never be longer than 600 bytes.
     uint256 public constant MIN_BRIEF = 1;
     uint256 public constant BRIEF_CAP = 600;
     uint256 public constant BRIEF_FLOOR = 100;
     uint256 public constant DURATION_FLOOR = 5 minutes;
     uint256 public constant DURATION_CAP = 365 days;
     uint256 public constant CASE_FEE_CAP = 1_000 ether;
+    uint256 public constant REIGN_CAP_BPS = 9_000; // the final leader always keeps at least 10% of the pot
+    uint256 public constant OVERTIME_CAP = 1 hours;
     uint256 public constant STALL_GRACE = 3 days; // see skipStalled
     uint256 public constant STALL_WAIT = 6 hours; // see skipStalled
     uint256 public constant MISTRIAL_GRACE = 2 minutes; // a timely answer can still land this long after the timeout
@@ -72,7 +72,6 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     uint256 public constant DELIVERED_GRACE = 6 hours;
     uint256 internal constant STEPS = 16; // briefs skipped at most per call while looking for the next hearing
     uint256 internal constant QUOTE_GAS = 100_000; // gas the requester's fee() gets
-    uint256 internal constant SINK_GAS = 500_000; // gas a rewards sink gets to pull its part
     uint256 internal constant RESERVE_GAS = 60_000; // kept back to finish the call after a failed sub-call
     uint256 internal constant HOLD_GAS = 50_000; // gas the holder token's balanceOf gets
 
@@ -91,6 +90,11 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint32 minDuration; // shortest and longest a new case may run
         uint32 maxDuration;
         uint16 maxBrief; // longest brief (and opening brief) in a new case, in UTF-8 bytes
+        uint16 reignBps; // share of the pot paid for time as the leader (the rest goes to the final leader)
+        uint32 overtime; // a new leader in a case's last `overtime` seconds pushes its deadline to now + overtime
+        uint32 finalCap; // overtime never runs a case more than this past its first deadline (0: no limit)
+        bool creatorSetsReign; // case creators pick their own reignBps (up to REIGN_CAP_BPS) instead of the one above
+        bool creatorSetsCap; // case creators pick their own finalCap (0 included) instead of the one above
     }
 
     IERC20 public immutable imd;
@@ -106,11 +110,6 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     // stop a docket or a settlement
     mapping(address => uint256) public unpaid;
     uint256 public unpaidTotal;
-    IRewardsSink public rewardsSink; // none at launch
-    uint16 public rewardsBps; // share of platformOwed routed to the sink on withdrawal (0 at launch)
-    IRewardsSink public pendingSink;
-    uint16 public pendingRewardsBps;
-    uint256 public sinkReadyAt;
     IERC20 public holderToken; // the token holders-only cases check (none at launch)
 
     // ---------------------------------------------------------------- types
@@ -143,10 +142,20 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint256 creatorOwed; // creator earnings not yet claimed
         uint256 creatorClaimed;
         address holdToken; // holders only: the token checked when filing (0: open to everyone)
-        uint16 maxBrief; // longest brief, in UTF-8 bytes
+        uint16 maxBrief; // longest brief, in UTF-8 bytes (in an English case, also in characters)
         uint256 minHold; // holders only: the balance of holdToken a brief's author must hold when filing
         uint96 reserve; // the most a hearing may pay the jury: params.maxOracleFee at creation (raiseReserve may lift it)
         uint64 stalledSince; // when the brief at the head of the docket first failed to open (0: not stalled)
+        // time as the leader: only challengers who took the lead (COOKED) earn it, until the deadline
+        uint16 reignBps; // share of the pot for time as the leader, fixed at creation
+        uint32 overtime; // fixed at creation
+        uint64 reignStart; // when the standing leader took the lead (0: the opening brief leads, nobody's time)
+        uint64 firstReign; // when the first challenger took the lead before the deadline (0: never)
+        uint64 reignTotal; // settled: seconds from firstReign to the deadline (every leader's seconds add up to it)
+        uint256 reignPool; // settled: the part of the pot paid for time as the leader
+        uint256 reignPaid; // of reignPool, paid so far
+        uint64 finalEnd; // overtime never pushes the deadline past this (0: no limit), fixed at creation
+        uint64 reignEnd; // time as the leader counts until here: the first deadline (overtime only decides the final leader)
     }
 
     enum BriefStatus {
@@ -185,16 +194,21 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     mapping(uint256 => string) public titleOf;
     mapping(uint256 => string) public taskOf;
     mapping(uint256 => string) public standardOf;
+    /// @notice the language a case's briefs must be in (0: any; see BriefsText.LANG_*)
+    mapping(uint256 => uint8) public langOf;
     mapping(uint256 => uint8) public avatarOf;
     /// @notice the brief's words (stored: each hearing quotes the standing precedent)
     mapping(uint256 => string) public briefText;
-    /// @notice every filed brief id of a case, in docket order
-    mapping(uint256 => uint256[]) internal docketOf;
+    /// @notice every filed brief id of a case, in docket order (the opening brief is not included): docketOf(case, i)
+    mapping(uint256 => uint256[]) public docketOf;
     mapping(bytes32 => uint256) public briefOfRequest;
+    /// @notice seconds an author led a case before its first deadline (as a challenger who took the lead); 0 once
+    ///         their share is paid (claimReign; the ReignPaid event keeps the seconds)
+    mapping(uint256 => mapping(address => uint256)) public reignOf;
 
     // ---------------------------------------------------------------- events
 
-    /// @notice avatar, deadline, seed and fee are in getCase(caseId) / avatarOf(caseId)
+    /// @notice deadline, seed and fee are in getCase(caseId); the face in avatarOf(caseId), the language in langOf(caseId)
     event CaseOpened(uint256 indexed caseId, address indexed creator, uint256 openingBrief, string title, string task, string standard);
     /// @notice also emitted for a case's opening brief (position 0)
     event BriefFiled(uint256 indexed briefId, uint256 indexed caseId, address indexed author, uint256 position, string text);
@@ -209,13 +223,12 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     event ParamsSet(Params p);
     event TreasurySet(address treasury);
     event Paused(bool paused);
-    event SinkProposed(address sink, uint16 bps, uint256 readyAt);
-    event SinkChanged(address sink, uint16 bps);
-    event SinkCancelled();
     event HolderTokenSet(address token);
     event PaymentHeld(address indexed to, uint256 amount); // the token refused a payment: claimUnpaid() pulls it later
     event UnpaidClaimed(address indexed to, uint256 amount);
     event ReserveRaised(uint256 indexed caseId, uint256 reserve);
+    event Overtime(uint256 indexed caseId, uint256 endsAt); // a new leader late in the case pushed the deadline
+    event ReignPaid(uint256 indexed caseId, address indexed leader, uint256 seconds_, uint256 amount);
 
     // ---------------------------------------------------------------- errors
 
@@ -235,6 +248,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     error NotHolder();
     error WrongOracle();
     error OracleTooExpensive();
+    error SettingsChanged();
 
     // ---------------------------------------------------------------- constructor
 
@@ -277,38 +291,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         emit Paused(p);
     }
 
-    /// @notice Plan where part of the platform's share goes later (e.g. a rewards contract). Takes effect after
-    ///         CONFIG_DELAY via applySink(); bps ≤ MAX_REWARDS_BPS. (address(0), 0) plans to stop routing.
-    function proposeSink(IRewardsSink sink, uint16 bps) external onlyOwner {
-        if (bps > MAX_REWARDS_BPS || (address(sink) == address(0)) != (bps == 0)) revert BadParams();
-        if (bps != 0 && address(sink).code.length == 0) revert BadParams(); // a sink must be a contract
-        pendingSink = sink;
-        pendingRewardsBps = bps;
-        sinkReadyAt = block.timestamp + CONFIG_DELAY;
-        emit SinkProposed(address(sink), bps, sinkReadyAt);
-    }
-
-    /// @notice Anyone applies a planned sink once the delay is over. Everything accrued before is first paid out
-    ///         under the old routing, so a change never reaches back.
-    function applySink() external nonReentrant {
-        if (sinkReadyAt == 0 || block.timestamp < sinkReadyAt) revert TooEarly();
-        _withdrawPlatform();
-        rewardsSink = pendingSink;
-        rewardsBps = pendingRewardsBps;
-        delete pendingSink;
-        delete pendingRewardsBps;
-        sinkReadyAt = 0;
-        emit SinkChanged(address(rewardsSink), rewardsBps);
-    }
-
-    function cancelSink() external onlyOwner {
-        delete pendingSink;
-        delete pendingRewardsBps;
-        sinkReadyAt = 0;
-        emit SinkCancelled();
-    }
-
-    /// @notice Pay out the platform's share: rewardsBps of it to the sink (none at launch), the rest to the treasury.
+    /// @notice Pay the platform's share to the treasury (a rewards splitter, later, is just another treasury).
     function withdrawPlatform() external nonReentrant {
         if (platformOwed == 0) revert NothingToClaim();
         _withdrawPlatform();
@@ -327,16 +310,25 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint64 endsAt; // entries close at this unix time, within minDuration..maxDuration from now
         uint256 minHold; // 0: anyone may file. Otherwise (owner only) only holders of at least this much holderToken
         uint32 oracleId; // the jury setup the creator saw (jury.latest()): the case is judged by it for life, or not opened
+        // the creator's pick when the owner lets creators set it, otherwise the current setting (what the creator saw):
+        uint16 reignBps; // share of the pot for time as the leader
+        uint32 finalCap; // the most overtime may add past endsAt, in seconds (0: no limit)
+        uint32 overtime; // the current setting, as the creator saw it (only the owner sets it)
+        // the language briefs must be in (BriefsText: 0 any, 1 English) and, with a language only, a shorter limit for
+        // them (0: the court's maxBrief). In English a byte is a character, so it is a limit in characters
+        uint8 lang;
+        uint16 maxBrief;
     }
 
     /// @notice Open a case. The creator's opening brief is the first precedent; the seed is the starting pot.
     function openCase(CaseInput calldata x) external nonReentrant returns (uint256 id) {
         if (paused) revert IsPaused();
-        text.check(bytes(x.title), MIN_TITLE, MAX_TITLE, MAX_TITLE * 4);
-        text.check(bytes(x.task), MIN_TASK, MAX_TASK, MAX_TASK);
-        text.check(bytes(x.standard), MIN_STANDARD, MAX_STANDARD, MAX_STANDARD);
-        text.check(bytes(x.opening), MIN_BRIEF, params.maxBrief, params.maxBrief);
         id = _newCase(x);
+        // the texts, the language and the brief limit (a shorter one comes with a language only), by BriefsText
+        cases[id].maxBrief = uint16(
+            text.checkCase(x.title, x.task, x.standard, x.opening, uint256(x.lang) | uint256(x.maxBrief) << 8 | uint256(params.maxBrief) << 32)
+        );
+        langOf[id] = x.lang;
         uint256 openingId = cases[id].precedent;
         titleOf[id] = x.title;
         taskOf[id] = x.task;
@@ -348,12 +340,29 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
 
     /// @notice File a brief: pay the entry fee and join the end of the docket. If nothing is being heard, the
     ///         hearing opens right away.
-    function fileBrief(uint256 caseId, string calldata words) external nonReentrant returns (uint256 id) {
+    function fileBrief(uint256 caseId, string calldata words) external nonReentrant returns (uint256) {
+        return _file(caseId, words, msg.sender);
+    }
+
+    /// @notice File a brief for `author`, who signed it (jury.relayMessage, personal_sign, until `deadline`); the
+    ///         caller pays the entry fee. The brief is the author's in every way: the lead, the pot, time as the leader
+    ///         and any refund go to the author. Lets players pay somewhere else (on another chain, say) and have a
+    ///         relayer file for them; a signature files one brief, once.
+    function fileBriefFor(uint256 caseId, string calldata words, address author, uint256 deadline, bytes calldata sig)
+        external
+        nonReentrant
+        returns (uint256)
+    {
+        jury.useRelay(caseId, words, author, deadline, sig);
+        return _file(caseId, words, author);
+    }
+
+    function _file(uint256 caseId, string calldata words, address author) private returns (uint256 id) {
         Case storage c = cases[caseId];
         if (c.status != CaseStatus.Open) revert NotOpen();
         if (block.timestamp >= c.endsAt) revert EntriesClosed();
-        text.check(bytes(words), MIN_BRIEF, c.maxBrief, c.maxBrief);
-        if (!holds(caseId, msg.sender)) revert NotHolder();
+        text.checkBrief(bytes(words), c.maxBrief, langOf[caseId]);
+        if (!holds(caseId, author)) revert NotHolder();
 
         // filing never depends on the oracle working: a failing or silent requester never stops it (see below)
         uint256 fee = c.fee;
@@ -361,7 +370,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
 
         id = ++briefCount;
         Brief storage b = briefs[id];
-        b.author = msg.sender;
+        b.author = author;
         b.caseId = uint64(caseId);
         b.status = BriefStatus.Queued;
         b.filedAt = uint64(block.timestamp);
@@ -378,7 +387,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
 
         // the fee waits in escrow until the verdict: only then is it split, and an unheard brief gets it all back
         imd.safeTransferFrom(msg.sender, address(this), fee);
-        emit BriefFiled(id, caseId, msg.sender, docketOf[caseId].length - cases[caseId].head, words);
+        emit BriefFiled(id, caseId, author, docketOf[caseId].length - cases[caseId].head, words);
         _hearNext(caseId);
     }
 
@@ -396,6 +405,19 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         }
         if (total == 0) revert NothingToClaim();
         imd.safeTransfer(msg.sender, total);
+    }
+
+    /// @notice Pay `who` their part of a settled case's pool for time as the leader: reignPool × their seconds / all
+    ///         seconds. Anyone may call it (the keeper pays everyone out after settlement); once per leader.
+    function claimReign(uint256 caseId, address who) external nonReentrant {
+        Case storage c = cases[caseId];
+        uint256 secs = reignOf[caseId][who];
+        if (c.status != CaseStatus.Settled || secs == 0) revert NothingToClaim();
+        reignOf[caseId][who] = 0; // paid: the seconds stay in the ReignPaid event
+        uint256 amount = (c.reignPool * secs) / c.reignTotal;
+        c.reignPaid += amount;
+        _pay(who, amount);
+        emit ReignPaid(caseId, who, secs, amount);
     }
 
     /// @notice Pull a payment the token refused earlier (a pot, a refund): only to the payee, once the token lets it.
@@ -445,6 +467,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         _split(c, uint256(c.fee) - b.oracleReserve); // a verdict at last: the fee less the jury's price is split now
         if (better) {
             b.status = BriefStatus.Overruled;
+            _newLeader(caseId, c); // the new leader's seconds are credited when it is replaced or at settlement
             c.precedent = uint64(briefId);
             c.streak = 0;
         } else {
@@ -548,15 +571,6 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         return docketOf[caseId].length - c.head + (c.hearing != 0 ? 1 : 0);
     }
 
-    /// @notice A case's brief ids in docket order, from `from` (at most `max`). The opening brief is not included.
-    function docket(uint256 caseId, uint256 from, uint256 max) external view returns (uint256[] memory out) {
-        uint256[] storage ids = docketOf[caseId];
-        uint256 n = from >= ids.length ? 0 : ids.length - from;
-        if (n > max) n = max;
-        out = new uint256[](n);
-        for (uint256 i; i < n; i++) out[i] = ids[from + i];
-    }
-
     /// @notice Whether settle(caseId) would pay now.
     function canSettle(uint256 caseId) public view returns (bool) {
         Case storage c = cases[caseId];
@@ -609,8 +623,15 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         c.fee = uint128(fee);
         c.seed = uint128(seed);
         c.pot = seed;
-        c.maxBrief = p.maxBrief;
         c.reserve = uint96(p.maxOracleFee);
+        // a setting the creator can't pick must be the one they saw: the owner may have changed it since
+        if (p.creatorSetsReign ? x.reignBps > REIGN_CAP_BPS : x.reignBps != p.reignBps) revert SettingsChanged();
+        if (p.creatorSetsCap ? x.finalCap > DURATION_CAP : x.finalCap != p.finalCap) revert SettingsChanged();
+        if (x.overtime != p.overtime) revert SettingsChanged();
+        c.reignBps = x.reignBps;
+        c.overtime = x.overtime;
+        if (x.finalCap != 0) c.finalEnd = endsAt + x.finalCap;
+        c.reignEnd = endsAt;
         if (x.minHold != 0) {
             c.holdToken = address(holderToken);
             c.minHold = x.minHold;
@@ -706,11 +727,46 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         emit HearingOpened(briefId, caseId, precedentId, requestId);
     }
 
+    /// @dev A challenger just took the lead (COOKED). The leader it replaced is credited its time until now, never past
+    ///      the case's first deadline (reignEnd): overtime decides the final leader but earns nobody time, so stretching
+    ///      a case never dilutes what earlier leaders earned. The opening brief earns none. A new leader in the case's
+    ///      last `overtime` seconds, before the deadline, pushes the deadline to now + overtime, never past finalEnd.
+    function _newLeader(uint256 caseId, Case storage c) private {
+        uint256 t = block.timestamp;
+        uint256 end = c.endsAt;
+        uint256 stop = c.reignEnd;
+        uint256 start = c.reignStart; // always before stop when set
+        if (start != 0) reignOf[caseId][briefs[c.precedent].author] += (t < stop ? t : stop) - start;
+        c.reignStart = 0; // a lead taken at or after the first deadline earns no time
+        if (t < stop) {
+            if (c.firstReign == 0) c.firstReign = uint64(t);
+            c.reignStart = uint64(t);
+        }
+        if (t < end) {
+            uint256 later = t + c.overtime;
+            uint256 cap = c.finalEnd;
+            if (cap != 0 && later > cap) later = cap;
+            if (later > end) {
+                c.endsAt = uint64(later);
+                emit Overtime(caseId, later);
+            }
+        }
+    }
+
     function _maybeSettle(uint256 caseId) private returns (bool) {
         if (!canSettle(caseId)) return false;
         Case storage c = cases[caseId];
         address winner = briefs[c.precedent].author;
-        uint256 prize = c.pot;
+        uint256 stop = c.reignEnd;
+        // the last leader's time, then the part of the pot for time as the leader: reignBps of it, scaled by the share
+        // of the case's life (until its first deadline) that had a challenger in the lead (the time before the first
+        // COOKED is nobody's)
+        if (c.reignStart != 0) reignOf[caseId][winner] += stop - c.reignStart;
+        uint256 total = c.firstReign == 0 ? 0 : stop - c.firstReign;
+        uint256 pool = (c.pot * c.reignBps * total) / (BPS * (stop - c.createdAt));
+        uint256 prize = c.pot - pool;
+        c.reignTotal = uint64(total);
+        c.reignPool = pool;
         c.status = CaseStatus.Settled;
         c.winner = winner;
         c.pot = 0;
@@ -723,23 +779,8 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint256 amount = platformOwed;
         if (amount == 0) return;
         platformOwed = 0;
-        // a sink without code (it self-destructed, say) counts as broken: calling it would revert outside the try
-        uint256 toRewards = address(rewardsSink).code.length == 0 ? 0 : (amount * rewardsBps) / BPS;
-        if (toRewards != 0) {
-            // the sink pulls its part inside notifyReward; whatever it does not take (it reverts, it is broken)
-            // goes to the treasury, so a bad sink can never lock the platform's share or block its own replacement
-            IRewardsSink sink = rewardsSink;
-            imd.forceApprove(address(sink), toRewards);
-            uint256 before = imd.balanceOf(address(this));
-            if (gasleft() < SINK_GAS + SINK_GAS / 63 + RESERVE_GAS) revert OutOfGas();
-            try sink.notifyReward{gas: SINK_GAS}(toRewards) {} catch {}
-            imd.forceApprove(address(sink), 0);
-            uint256 left = imd.balanceOf(address(this));
-            uint256 pulled = left < before ? before - left : 0;
-            toRewards = pulled < toRewards ? pulled : toRewards;
-        }
-        imd.safeTransfer(treasury, amount - toRewards);
-        emit PlatformWithdrawn(amount - toRewards, toRewards);
+        imd.safeTransfer(treasury, amount);
+        emit PlatformWithdrawn(amount, 0);
     }
 
     /// @dev Push a payment; if the token refuses it (the payee is blocked, say), keep it for claimUnpaid instead, so the
@@ -779,7 +820,8 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
                 || uint256(p.quorum) * 2 <= p.panelSize || p.panelSize > 100 || p.answerTimeout < 3 minutes
                 || p.answerTimeout > 2 hours || p.caseFee > CASE_FEE_CAP || p.minDuration < DURATION_FLOOR
                 || p.maxDuration > DURATION_CAP || p.minDuration >= p.maxDuration || p.maxBrief < BRIEF_FLOOR
-                || p.maxBrief > BRIEF_CAP
+                || p.maxBrief > BRIEF_CAP || p.reignBps > REIGN_CAP_BPS || p.overtime > OVERTIME_CAP
+                || p.finalCap > DURATION_CAP
         ) revert BadParams();
         params = p;
         emit ParamsSet(p);
