@@ -156,6 +156,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint256 reignPaid; // of reignPool, paid so far
         uint64 finalEnd; // overtime never pushes the deadline past this (0: no limit), fixed at creation
         uint64 reignEnd; // time as the leader counts until here: the first deadline (overtime only decides the final leader)
+        uint256 overtimePot; // of pot, what briefs filed in overtime added: it goes to the final leader alone
     }
 
     enum BriefStatus {
@@ -468,7 +469,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
 
         uint256 caseId = b.caseId;
         Case storage c = cases[caseId];
-        _split(c, uint256(c.fee) - b.oracleReserve); // a verdict at last: the fee less the jury's price is split now
+        // a verdict at last: the fee less the jury's price is split now; a brief filed in overtime pays the final leader only
+        uint256 toPot = _split(c, uint256(c.fee) - b.oracleReserve);
+        if (b.filedAt >= c.reignEnd) c.overtimePot += toPot;
         if (better) {
             b.status = BriefStatus.Overruled;
             _newLeader(caseId, c, b.filedAt); // its seconds are credited when it is replaced or at settlement
@@ -586,12 +589,13 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
 
     /// @dev A fee after the jury's price: creatorBps to the creator (claimable), platformBps to the platform,
     ///      the rest (with rounding dust) into the pot.
-    function _split(Case storage c, uint256 rest) private {
+    function _split(Case storage c, uint256 rest) private returns (uint256 toPot) {
         uint256 toCreator = (rest * c.creatorBps) / BPS;
         uint256 toPlatform = (rest * c.platformBps) / BPS;
         c.creatorOwed += toCreator;
         platformOwed += toPlatform;
-        c.pot += rest - toCreator - toPlatform;
+        toPot = rest - toCreator - toPlatform;
+        c.pot += toPot;
     }
 
     function _newCase(CaseInput calldata x) private returns (uint256 id) {
@@ -769,10 +773,10 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint256 stop = c.reignEnd;
         // the last leader's time, then the part of the pot for time as the leader: reignBps of it, scaled by the share
         // of the case's life (until its first deadline) that had a challenger in the lead (the time before the first
-        // COOKED is nobody's)
+        // COOKED is nobody's). What briefs filed in overtime added is left out: it goes to the final leader alone
         if (c.reignStart != 0) reignOf[caseId][winner] += stop - c.reignStart;
         uint256 total = c.firstReign == 0 ? 0 : stop - c.firstReign;
-        uint256 pool = (c.pot * c.reignBps * total) / (BPS * (stop - c.createdAt));
+        uint256 pool = ((c.pot - c.overtimePot) * c.reignBps * total) / (BPS * (stop - c.createdAt));
         uint256 prize = c.pot - pool;
         c.reignTotal = uint64(total);
         c.reignPool = pool;

@@ -1582,7 +1582,9 @@ contract BriefsTest is Test {
         assertEq(b.reignOf(c, alice), 7 minutes);
         assertEq(b.reignOf(c, bob), 4 minutes);
         assertEq(b.reignOf(c, alice) + b.reignOf(c, bob) + b.reignOf(c, carol), k.reignTotal);
-        assertEq(k.reignPool, (SEED + 22 * TO_POT) * 6_000 * 11 minutes / (10_000 * (end0 - k.createdAt)));
+        // the 20 briefs filed in overtime fed the final leader only: the pool counts the first two
+        assertEq(k.overtimePot, 20 * TO_POT);
+        assertEq(k.reignPool, (SEED + 2 * TO_POT) * 6_000 * 11 minutes / (10_000 * (end0 - k.createdAt)));
     }
 
     /// a brief filed before the deadline but heard after it can still take the lead and the final share; its time
@@ -1848,8 +1850,9 @@ contract BriefsTest is Test {
         assertEq(b.reignOf(c, alice), end0 - 5 minutes - (k0.createdAt + 1 hours));
         assertEq(b.reignOf(c, bob), 5 minutes);
         assertEq(k.reignTotal, end0 - (k0.createdAt + 1 hours));
-        // the pool is measured against the first deadline, whatever overtime added
-        uint256 pot = SEED + 32 * TO_POT;
+        // the pool is measured against the first deadline, and what overtime added goes to the final leader alone
+        uint256 pot = SEED + 2 * TO_POT;
+        assertEq(k.overtimePot, 30 * TO_POT);
         assertEq(k.reignPool, (pot * 6_000 * k.reignTotal) / (10_000 * (end0 - k0.createdAt)));
     }
 
@@ -1866,6 +1869,28 @@ contract BriefsTest is Test {
         assertEq(b.getCase(c).winner, bob);
         assertEq(b.reignOf(c, alice), 2 minutes);
         assertEq(b.reignOf(c, bob), 0);
+    }
+
+    /// IMD paid in overtime goes to the final leader alone; a brief filed before the deadline and heard in overtime
+    /// still feeds the pool for time in the lead
+    function test_Reign_OvertimeEntriesPayOnlyTheFinalLeader() public {
+        _reignParams();
+        uint256 c = _case();
+        uint256 end0 = b.getCase(c).endsAt;
+        _verdictAt(_fileAt(c, alice, B1, end0 - 9 hours), true, end0 - 9 hours);
+        _verdictAt(_fileAt(c, bob, B2, end0 - 3 minutes), true, end0 - 3 minutes); // overtime to end0 + 7 min
+        uint256 late = _fileAt(c, carol, "Filed on time", end0 - 1 minutes);
+        _verdictAt(late, false, end0 + 1 minutes); // filed on time, heard in overtime: counts for the pool
+        uint256 t = end0 + 2 minutes;
+        _verdictAt(_fileAt(c, carol, "Overtime one", t), false, t);
+        _verdictAt(_fileAt(c, alice, "Overtime two", t + 1), false, t + 1);
+        vm.warp(b.getCase(c).endsAt);
+        b.settle(c);
+        Briefs.Case memory k = b.getCase(c);
+        assertEq(k.overtimePot, 2 * TO_POT);
+        uint256 base = SEED + 3 * TO_POT;
+        assertEq(k.reignPool, (base * 6_000 * k.reignTotal) / (10_000 * (end0 - k.createdAt)));
+        assertEq(k.winner, bob);
     }
 
     /// overtime is pinned like the share and the limit: the owner can't change it under a pending openCase

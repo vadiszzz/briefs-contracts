@@ -229,3 +229,11 @@ otherwise; each contract fix has a test.
 
 The site and API mirror the new rule (`views.reignOf`, unit-tested against the same cases as the contract).
 Briefs is 24,400 bytes, 176 under the limit.
+
+### Added after the eighth review (not yet reviewed)
+
+- **Overtime pays the final leader only.** `Case.overtimePot` adds up what briefs filed at or after the first deadline
+  (`reignEnd`) put into the pot; settlement measures the pool for time in the lead on `pot - overtimePot`, so players
+  who join in overtime pay only the final leader. A brief filed before the deadline and heard in overtime still feeds
+  the pool. `_split` returns the pot's part to make this one line in `fulfill`. `test_Reign_OvertimeEntriesPayOnlyTheFinalLeader`;
+  the two overtime tests now check `overtimePot`. Briefs is 24,522 bytes, 54 under the limit.

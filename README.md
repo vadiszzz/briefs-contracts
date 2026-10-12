@@ -38,7 +38,7 @@ This branch is **v2, under review and not deployed**: part of the pot pays every
 
 ## Time in the lead
 
-`reignBps` of the pot (scaled by the share of the case's life that had a challenger in the lead) is shared by how long each challenger held the lead, until the case's **first** deadline (`reignEnd`). A leader's time counts from when its brief was **filed**, not from its verdict, and ends when the next leader's brief was filed, so a slow hearing or a leader stuffing the queue with its own briefs moves nobody's time. Overtime decides the final leader but earns nobody time, so stretching a case can't dilute what earlier leaders earned. The time before the first winning brief is nobody's. The final leader takes the rest of the pot at settlement; each leader's share is paid by `claimReign(caseId, leader)` (anyone may call it, once per leader).
+`reignBps` of the pot (scaled by the share of the case's life that had a challenger in the lead) is shared by how long each challenger held the lead, until the case's **first** deadline (`reignEnd`). A leader's time counts from when its brief was **filed**, not from its verdict, and ends when the next leader's brief was filed, so a slow hearing or a leader stuffing the queue with its own briefs moves nobody's time. Overtime decides the final leader but earns nobody time, so stretching a case can't dilute what earlier leaders earned. What briefs filed in overtime add to the pot (`overtimePot`) goes to the final leader alone. The time before the first winning brief is nobody's. The final leader takes the rest of the pot at settlement; each leader's share is paid by `claimReign(caseId, leader)` (anyone may call it, once per leader).
 
 ## Money
 
@@ -54,7 +54,7 @@ On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per 
 
 ```sh
 forge build
-forge test          # 161 tests, including PoCs and regressions in test/audit, a solvency invariant and a fuzz of the time-in-the-lead books
+forge test          # 162 tests, including PoCs and regressions in test/audit, a solvency invariant and a fuzz of the time-in-the-lead books
 ```
 
 Foundry with solc 0.8.30 (optimizer, 100 runs). `lib/` holds OpenZeppelin Contracts v5.4.0 and forge-std.
