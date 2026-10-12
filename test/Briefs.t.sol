@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {Briefs} from "../src/Briefs.sol";
@@ -1893,6 +1893,40 @@ contract BriefsTest is Test {
         assertEq(k.winner, bob);
     }
 
+    /// filed exactly at the first deadline counts as overtime; a mistrial in overtime adds nothing; the final leader
+    /// takes the pot less the pool, to the wei
+    function test_Reign_ABriefFiledAtTheBellIsOvertimeAndAMistrialAddsNothing() public {
+        _reignParams();
+        uint256 c = _case();
+        uint256 end0 = b.getCase(c).endsAt;
+        _verdictAt(_fileAt(c, alice, B1, end0 - 9 hours), true, end0 - 9 hours);
+        _verdictAt(_fileAt(c, bob, B2, end0 - 3 minutes), true, end0 - 3 minutes); // overtime to end0 + 7 min
+        assertEq(b.getCase(c).reignEnd, end0);
+        // filed at exactly reignEnd: overtime
+        _verdictAt(_fileAt(c, carol, "At the bell", end0), false, end0);
+        assertEq(b.getCase(c).overtimePot, TO_POT);
+        // filed in overtime, mistrial: nothing to pot or overtimePot
+        uint256 pot = b.getCase(c).pot;
+        assertEq(pot, SEED + 3 * TO_POT);
+        uint256 bobBefore = imd.balanceOf(bob);
+        uint256 m = _fileAt(c, alice, "Mistried", end0 + 1 minutes);
+        assertEq(b.getCase(c).hearing, m);
+        vm.warp(block.timestamp + 6 minutes + 1);
+        b.mistrial(c);
+        Briefs.Case memory k = b.getCase(c);
+        assertEq(k.overtimePot, TO_POT);
+        if (block.timestamp < k.endsAt) vm.warp(k.endsAt);
+
+        if (b.getCase(c).status == Briefs.CaseStatus.Open) b.settle(c);
+        k = b.getCase(c);
+        uint256 pool = ((pot - TO_POT) * 6_000 * k.reignTotal) / (10_000 * (end0 - k.createdAt));
+        assertEq(k.reignPool, pool);
+        assertEq(k.winner, bob);
+        assertEq(imd.balanceOf(bob) - bobBefore, pot - pool, "final leader gets the rest");
+        assertEq(k.pot, 0);
+        assertEq(k.overtimePot, TO_POT); // kept after settlement (pot is 0 then): read it only with an open case
+    }
+
     /// overtime is pinned like the share and the limit: the owner can't change it under a pending openCase
     function test_Settings_OvertimeIsWhatTheCreatorSaw() public {
         _reignParams();
@@ -1957,6 +1991,7 @@ contract BriefsTest is Test {
         inReign = uint16(uint256(keccak256(abi.encode(seed, "r"))) % 9_001);
         inCap = uint32(uint256(keccak256(abi.encode(seed, "c"))) % 3 hours);
         uint256 c = _case();
+        vm.recordLogs(); // to read the prize at settlement (the pot before it = prize + pool)
         who5 = [creator, alice, bob, carol, keeper];
         vm.prank(keeper);
         imd.approve(address(b), type(uint256).max);
@@ -1992,6 +2027,20 @@ contract BriefsTest is Test {
             if (b.getCase(c).status == Briefs.CaseStatus.Open) b.settle(c);
         }
         k2 = b.getCase(c);
+        // the pool is measured on the pot less what overtime filings added
+        {
+            Vm.Log[] memory logs = vm.getRecordedLogs();
+            uint256 prize = type(uint256).max;
+            for (uint256 j; j < logs.length; j++) {
+                if (logs[j].emitter == address(b) && logs[j].topics[0] == Briefs.CaseSettled.selector) {
+                    (, prize) = abi.decode(logs[j].data, (uint256, uint256));
+                }
+            }
+            assertTrue(prize != type(uint256).max, "settled");
+            uint256 potBefore = prize + k2.reignPool;
+            assertLe(k2.overtimePot, potBefore - SEED);
+            assertEq(k2.reignPool, ((potBefore - k2.overtimePot) * k2.reignBps * k2.reignTotal) / (10_000 * (k2.reignEnd - k2.createdAt)));
+        }
         uint256 sum;
         assertLe(k2.firstReign == 0 ? 0 : k2.reignEnd - k2.firstReign, k2.reignEnd - k2.createdAt);
         for (uint256 j; j < 5; j++) sum += b.reignOf(c, who5[j]);

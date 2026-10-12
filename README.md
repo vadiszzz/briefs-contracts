@@ -54,7 +54,7 @@ On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per 
 
 ```sh
 forge build
-forge test          # 162 tests, including PoCs and regressions in test/audit, a solvency invariant and a fuzz of the time-in-the-lead books
+forge test          # 163 tests, including PoCs and regressions in test/audit, a solvency invariant and a fuzz of the time-in-the-lead books
 ```
 
 Foundry with solc 0.8.30 (optimizer, 100 runs). `lib/` holds OpenZeppelin Contracts v5.4.0 and forge-std.

@@ -237,3 +237,21 @@ Briefs is 24,400 bytes, 176 under the limit.
   who join in overtime pay only the final leader. A brief filed before the deadline and heard in overtime still feeds
   the pool. `_split` returns the pot's part to make this one line in `fulfill`. `test_Reign_OvertimeEntriesPayOnlyTheFinalLeader`;
   the two overtime tests now check `overtimePot`. Briefs is 24,522 bytes, 54 under the limit.
+
+### Ninth review: what came after the eighth (October 2026)
+
+Two reviewers, on the diff only: `Case.overtimePot` (contract) and the simpler case pages, the pay switch and the
+live time-in-the-lead ticker (site and server). No Critical, High or Medium issue in the contract.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Site: the live ticker restarted from the fetched value whenever the page was re-drawn from the same data (a failed poll, a search), so it could step back and run past the deadline | Ticks are timed from when the numbers arrived (`receivedAt`), not from each re-draw |
+| 2 | Low | The docs said a leader's live share "never goes down", but a queued brief that wins takes the lead from its filing time, so the previous leader's count can step back | Reworded |
+| 3 | Low | The pay switch defaulted to Ethereum before the wallet's balance had loaded, and with a payment already waiting there | Ethereum is the default only when the balance is known to be short and nothing is pending |
+| 4 | Low | Toggling the pay switch during a submit re-enabled the button | It stays disabled while submitting |
+| 5 | Low | Without `event.submitter` (old Safari), a keyboard submit after choosing Ethereum went the Robinhood route | The checked switch decides |
+| 6 | Info | A scratch audit test had been committed under `test/audit/`, re-running the whole suite | Folded into `Briefs.t.sol` as `test_Reign_ABriefFiledAtTheBellIsOvertimeAndAMistrialAddsNothing` |
+| 7 | Info | The fuzz checked that the books balance, not the pool formula | It now checks the pool against `pot - overtimePot` at settlement |
+| 8 | Info | `overtimePot` is kept after settlement while `pot` goes to 0; demo mode now takes English briefs only; a database migrated mid-case shows `overtime_pot` 0 until the case's next event | Accepted (the API ignores it once settled; v2 deploys fresh contracts) |
+
+Briefs is 24,522 bytes, 54 under the limit: the next contract change needs room made first.
