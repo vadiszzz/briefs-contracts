@@ -322,13 +322,14 @@ contract BriefsJury is Ownable2Step {
         SafeERC20.safeTransferFrom(court.imd(), msg.sender, author, amount);
     }
 
-    /// @dev A case's entry fee: word 15 of Briefs.getCase (a static struct, returned inline)
+    /// @dev A case's entry fee: word 15 of Briefs.getCase (a static struct, returned inline); only for a case that exists
     function _feeOf(uint256 caseId) private view returns (uint256 fee) {
         (bool ok, bytes memory r) = address(court).staticcall(abi.encodeWithSignature("getCase(uint256)", caseId));
         if (!ok || r.length < 16 * 32) revert NothingToRefund();
         assembly ("memory-safe") {
             fee := mload(add(r, 512)) // 32 (length) + 15 × 32
         }
+        if (fee == 0) revert NothingToRefund(); // no such case (yet): every real case has a fee of at least minFee
     }
 
     /// @dev The message hash, once `author` is shown to have signed it and it is unused (or, for a refund, not filed).

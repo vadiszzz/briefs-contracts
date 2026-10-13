@@ -1971,6 +1971,45 @@ contract BriefsTest is Test {
         assertEq(uint8(b.getCase(c2).status), uint8(Briefs.CaseStatus.Open));
     }
 
+    /// fifth IMD swarm audit, finding 3: the window is measured from the first deadline, so a brief filed in it still
+    /// opens overtime after an earlier leader in the docket has already pushed the deadline
+    function test_Reign_AnEarlierPushDoesntTakeALateFilingOutOfItsWindow() public {
+        _reignParams();
+        uint256 c = _case();
+        uint256 e = b.getCase(c).endsAt;
+        uint256 b1 = _fileAt(c, bob, B2, e - 9 minutes); // heard at once
+        uint256 a1 = _fileAt(c, alice, B1, e - 9 minutes + 30); // waits behind it
+        _verdictAt(b1, true, e - 8 minutes); // pushes the deadline to e + 2 min
+        uint256 end1 = b.getCase(c).endsAt;
+        assertEq(end1, e + 2 minutes);
+        _verdictAt(a1, true, end1 + 1); // lands after the pushed deadline
+        Briefs.Case memory k = b.getCase(c);
+        assertEq(k.endsAt, end1 + 1 + 10 minutes);
+        assertEq(uint8(k.status), uint8(Briefs.CaseStatus.Open));
+        // a brief filed before the window and heard late still adds none
+        uint256 c2 = _case();
+        uint256 e2 = b.getCase(c2).endsAt;
+        uint256 early = _fileAt(c2, bob, B2, e2 - 11 minutes);
+        _verdictAt(early, true, e2 + 1);
+        assertEq(b.getCase(c2).endsAt, e2);
+        assertEq(uint8(b.getCase(c2).status), uint8(Briefs.CaseStatus.Settled));
+    }
+
+    /// fifth IMD swarm audit, finding 1: no refund for a case that doesn't exist yet (the fee floor would be 0)
+    function test_Relay_NoRefundForACaseThatIsNotOpenYet() public {
+        uint256 next = b.caseCount() + 1;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _relaySig(DAN_KEY, next, B1, deadline);
+        vm.prank(carol);
+        imd.approve(address(jury), type(uint256).max);
+        vm.prank(carol);
+        vm.expectRevert(BriefsJury.NothingToRefund.selector);
+        jury.refundRelay(next, B1, vm.addr(DAN_KEY), deadline, sig, 1);
+        assertEq(_case(), next);
+        vm.prank(alice);
+        b.fileBriefFor(next, B1, vm.addr(DAN_KEY), deadline, sig); // still fileable once the case opens
+    }
+
     /// IMD swarm audit, finding 3: the jury and limits a case fixes for life are what the creator saw
     function test_Settings_TheJuryAndLimitsAreWhatTheCreatorSaw() public {
         Briefs.Params memory p = _params();
@@ -2095,14 +2134,22 @@ contract BriefsTest is Test {
             if (block.timestamp + 1 < k.endsAt) {
                 uint256 near = (r >> 40) % 3 == 0 ? k.endsAt - 1 - (r >> 48) % 20 minutes : block.timestamp;
                 if (near > block.timestamp) vm.warp(near);
-                uint256 id = _file(c, who5[(r >> 16) % 5], string.concat("brief ", vm.toString(i)));
-                if (b.getCase(c).hearing != id) break;
-                uint256 kind = (r >> 24) % 5;
-                if (kind == 0) {
-                    vm.warp(block.timestamp + 6 minutes + 1);
-                    b.mistrial(c);
-                } else {
-                    _verdictAt(id, kind != 1, block.timestamp + dt);
+                // 1 to 3 briefs at once: the later ones wait in the docket behind a running hearing (IMD swarm audit,
+                // finding 5), so leads are credited from filings that precede the previous verdict
+                uint256 n = 1 + (r >> 56) % 3;
+                for (uint256 f; f < n && block.timestamp < b.getCase(c).endsAt; f++) {
+                    _file(c, who5[(r >> (16 + f * 8)) % 5], string.concat("brief ", vm.toString(i), "-", vm.toString(f)));
+                    if (block.timestamp + 7 < b.getCase(c).endsAt) vm.warp(block.timestamp + 7);
+                }
+                // hear the docket in order: mistrials, denials and wins, some landing after the deadline
+                for (uint256 v; v < 3 && b.getCase(c).hearing != 0; v++) {
+                    uint256 kind = (r >> (24 + v * 8)) % 5;
+                    if (kind == 0) {
+                        vm.warp(block.timestamp + 6 minutes + 1);
+                        b.mistrial(c);
+                    } else {
+                        _verdictAt(b.getCase(c).hearing, kind != 1, block.timestamp + dt / (v + 1));
+                    }
                 }
             } else {
                 break;
@@ -2110,7 +2157,7 @@ contract BriefsTest is Test {
         }
         Briefs.Case memory k2 = b.getCase(c);
         if (k2.status == Briefs.CaseStatus.Open) {
-            if (k2.hearing != 0) _verdictAt(k2.hearing, true, block.timestamp + 31);
+            for (uint256 v; v < 10 && b.getCase(c).hearing != 0; v++) _verdictAt(b.getCase(c).hearing, true, block.timestamp + 31);
             if (block.timestamp < b.getCase(c).endsAt) vm.warp(b.getCase(c).endsAt);
             if (b.getCase(c).status == Briefs.CaseStatus.Open) b.settle(c);
         }

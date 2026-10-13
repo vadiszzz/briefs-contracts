@@ -766,8 +766,10 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
             c.reignStart = uint64(from);
         }
         // overtime: a lead taken late (its verdict before the deadline, or its brief filed in the last `overtime`
-        // seconds, however long the jury took) pushes the deadline to now + overtime, so others can still answer
-        if (t < end || filedAt + c.overtime > end) {
+        // seconds before the first deadline or after it, however long the jury took) pushes the deadline to now +
+        // overtime, so others can still answer. Measured from the first deadline, not the current one: an earlier
+        // leader that pushed it doesn't take a later brief out of the window it was filed in
+        if (t < end || filedAt + c.overtime > stop) {
             uint256 later = t + c.overtime;
             uint256 cap = c.finalEnd;
             if (cap != 0 && later > cap) later = cap;

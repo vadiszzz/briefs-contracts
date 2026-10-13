@@ -271,3 +271,16 @@ specialists and a judge. 1 Medium, 2 Low, 2 Info; each fixed with a test, or wri
 
 To fit the new checks Briefs builds with 20 optimizer runs (it is 24,445 bytes, 131 under the limit); gas per call
 rises slightly, well under the 7M the site and keeper send.
+
+## Eleventh review: the fifth IMD swarm audit, of the fixes (October 2026)
+
+[IMD job a5960b3e](https://explorer.imd.fun/jobs/a5960b3e-4ac1-4e65-8fc2-087178af730a) on commit `8d014e4`: no Medium
+or above; 3 Low, 2 Info.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | The refund floor read 0 for a case id not opened yet, so a brief signed for the next case could be voided for a wei | `_feeOf` reverts for a case with no fee (none exists until opened). `test_Relay_NoRefundForACaseThatIsNotOpenYet` |
+| 2 | Low | Anyone holding a relayed signature can cancel the brief by refunding the entry fee to its author; filing is court-only | Accepted. The signature appears only in the relayer's own transactions; Robinhood Chain has no public mempool, and our relayer's filings revert only when the brief is refunded anyway. The author is paid at least the fee. Revisit (a relayer named in the signed message) if third-party relayers appear |
+| 3 | Low | The overtime window was measured from the current deadline: after an earlier leader pushed it, a brief filed in the original window and judged late could take the lead and settle the case unanswered | The window is measured from the first deadline: `filedAt + overtime > reignEnd` (any brief filed in the last `overtime` seconds before it, or after it). `test_Reign_AnEarlierPushDoesntTakeALateFilingOutOfItsWindow` |
+| 4 | Info | Anyone can apply a ready oracle proposal ahead of a pending openCase, which then reverts WrongOracle | Accepted: the site reads the setup right before sending and explains WrongOracle; the owner applies proposals promptly |
+| 5 | Info | The time-in-the-lead fuzz heard one brief at a time, never a docket | It now files 1 to 3 briefs per step and hears them in order, some after the deadline; the same assertions hold |

@@ -31,7 +31,7 @@ This branch is **v2, under review and not deployed**: part of the pot pays every
 2. **File** (`fileBrief`): pay the fee and join a public FIFO docket. The fee waits in escrow. Or **file for someone** (`fileBriefFor`): the author signed the brief (`personal_sign` of `relayMessage`: the case, the author, the words and a deadline, valid once) and the caller pays the fee; the brief is the author's in every way.
 3. **Hearings**, one at a time, in docket order: each asks IMD whether the brief is better than the leader standing at that moment, judged by the standard (a tie or a reworded copy keeps the leader). The request names `BriefsJury` as its EIP-712 consumer and as the Intake callback, so IMD signs the answer for that contract only.
 4. **Verdicts** (`fulfill`, by anyone): the jury rebuilds the hearing's `questionHash` on chain, requires that IMD's Intake delivered exactly this attestation for the hearing's request, checks the answer window, the panel and the signature.
-   - Better (COOKED): the brief becomes the leader. A new leader in the last `overtime` seconds before the deadline, or whose brief was filed in them however long the jury took, pushes the deadline to now + `overtime`, never past the case's `finalEnd` when it has a limit.
+   - Better (COOKED): the brief becomes the leader. A new leader in the last `overtime` seconds before the deadline, or whose brief was filed in the last `overtime` seconds before the first deadline (or after it) however long the jury took, pushes the deadline to now + `overtime`, never past the case's `finalEnd` when it has a limit.
    - Not better: the leader stays.
    - No answer in time (`mistrial`, by anyone after a grace): the leader stays and the author gets the fee back less the jury's price.
 5. **Settle**: entries close at the deadline, every on-time brief is still heard, then the pot is paid (`settle`, by anyone).
@@ -54,11 +54,11 @@ On a verdict, a brief's fee less the jury's price (IMD's flat price, capped per 
 
 ```sh
 forge build
-forge test          # 166 tests, including PoCs and regressions in test/audit, a solvency invariant and a fuzz of the time-in-the-lead books
+forge test          # 168 tests, including PoCs and regressions in test/audit, a solvency invariant and a fuzz of the time-in-the-lead books
 ```
 
 Foundry with solc 0.8.30 (optimizer, 20 runs, to keep Briefs under 24 KB). `lib/` holds OpenZeppelin Contracts v5.4.0 and forge-std.
 
 ## Reviews
 
-`docs/audit-internal-2026-10.md`: our own two reviews of v1 (every finding with a Foundry PoC in `test/audit/`), three IMD swarm audits of v1 ([first](https://explorer.imd.fun/jobs/21511e3a-2ed8-4813-b82c-70dcb61af7d4), [re-audit](https://explorer.imd.fun/jobs/8e03ebfb-e610-4f68-8fe5-71ab8251a8d2), [third](https://explorer.imd.fun/jobs/715e3900-cecb-406e-ba02-6e58d5806d98); all addressed) and our own five-auditor review before the redeploy, then the **seventh review**: v2 (time in the lead, overtime, relayed filing), five independent audits plus a re-check of the fixes, the **eighth**: English-only cases and a fresh full review of v2, the **ninth** on what came after, and the **fourth IMD swarm audit**, of v2 ([job](https://explorer.imd.fun/jobs/0b0d0d84-c7e0-4dd4-b87e-d94e2e5150d9)), all findings fixed or written down.
+`docs/audit-internal-2026-10.md`: our own two reviews of v1 (every finding with a Foundry PoC in `test/audit/`), three IMD swarm audits of v1 ([first](https://explorer.imd.fun/jobs/21511e3a-2ed8-4813-b82c-70dcb61af7d4), [re-audit](https://explorer.imd.fun/jobs/8e03ebfb-e610-4f68-8fe5-71ab8251a8d2), [third](https://explorer.imd.fun/jobs/715e3900-cecb-406e-ba02-6e58d5806d98); all addressed) and our own five-auditor review before the redeploy, then the **seventh review**: v2 (time in the lead, overtime, relayed filing), five independent audits plus a re-check of the fixes, the **eighth**: English-only cases and a fresh full review of v2, the **ninth** on what came after, the **fourth IMD swarm audit**, of v2 ([job](https://explorer.imd.fun/jobs/0b0d0d84-c7e0-4dd4-b87e-d94e2e5150d9)), and the **fifth**, of its fixes ([job](https://explorer.imd.fun/jobs/a5960b3e-4ac1-4e65-8fc2-087178af730a)), all findings fixed or written down.
