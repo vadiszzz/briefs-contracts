@@ -323,6 +323,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint256 caseFee;
         uint16 creatorBps;
         uint16 platformBps;
+        // the jury and the limits the case fixes for life, as the creator saw them: panelSize | quorum << 16 |
+        // answerTimeout << 32 | the court's maxBrief << 64 | maxOracleFee (the jury reserve) << 80
+        uint256 terms;
     }
 
     /// @notice Open a case. The creator's opening brief is the first precedent; the seed is the starting pot.
@@ -635,7 +638,12 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         // a setting the creator can't pick must be the one they saw: the owner may have changed it since
         if (p.creatorSetsReign ? x.reignBps > REIGN_CAP_BPS : x.reignBps != p.reignBps) revert SettingsChanged();
         if (p.creatorSetsCap ? x.finalCap > DURATION_CAP : x.finalCap != p.finalCap) revert SettingsChanged();
-        if (x.overtime != p.overtime || x.caseFee != p.caseFee || x.creatorBps != p.creatorBps || x.platformBps != p.platformBps) {
+        if (
+            x.overtime != p.overtime || x.caseFee != p.caseFee || x.creatorBps != p.creatorBps || x.platformBps != p.platformBps
+                || x.terms
+                    != (uint256(p.panelSize) | uint256(p.quorum) << 16 | uint256(p.answerTimeout) << 32 | uint256(p.maxBrief) << 64
+                        | uint256(p.maxOracleFee) << 80)
+        ) {
             revert SettingsChanged();
         }
         c.reignBps = x.reignBps;
@@ -741,8 +749,10 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     ///      then on, and the queue (FIFO, one hearing at a time) only decided when that came to light, so nobody gains
     ///      time by filling the queue ahead of a challenger, or by a slow jury or relay. The leader it replaces is
     ///      credited until that moment, never past the case's first deadline (reignEnd): overtime decides the final
-    ///      leader but earns nobody time. The opening brief earns none. A new leader in the case's last `overtime`
-    ///      seconds, before the deadline, pushes the deadline to now + overtime, never past finalEnd.
+    ///      leader but earns nobody time. The opening brief earns none (its author can still play from another wallet
+    ///      like anyone). A new leader whose verdict lands before the deadline in its last `overtime` seconds, or whose
+    ///      brief was filed in them however long the jury took, pushes the deadline to now + overtime, never past
+    ///      finalEnd.
     function _newLeader(uint256 caseId, Case storage c, uint256 filedAt) private {
         uint256 t = block.timestamp;
         uint256 end = c.endsAt;
@@ -755,7 +765,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
             if (c.firstReign == 0) c.firstReign = uint64(from);
             c.reignStart = uint64(from);
         }
-        if (t < end) {
+        // overtime: a lead taken late (its verdict before the deadline, or its brief filed in the last `overtime`
+        // seconds, however long the jury took) pushes the deadline to now + overtime, so others can still answer
+        if (t < end || filedAt + c.overtime > end) {
             uint256 later = t + c.overtime;
             uint256 cap = c.finalEnd;
             if (cap != 0 && later > cap) later = cap;

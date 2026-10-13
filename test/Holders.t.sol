@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Terms} from "./utils/Terms.sol";
 import {Briefs} from "../src/Briefs.sol";
 import {BriefsText} from "../src/BriefsText.sol";
 import {BriefsJury} from "../src/BriefsJury.sol";
@@ -32,6 +33,7 @@ contract HoldersTest is Test {
     MockERC20 imd;
     MockERC20 token; // the project token holders-only cases check
     Briefs b;
+    uint256 inTerms; // CaseInput.terms: the settings the creator saw
     address creator = makeAddr("creator");
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
@@ -49,6 +51,7 @@ contract HoldersTest is Test {
             address(this), address(0)
         );
         b = new Briefs(IERC20(address(imd)), new BriefsText(), jury, treasury, _params());
+        inTerms = Terms.pack(b.getParams());
         imd.approve(address(b), type(uint256).max); // the owner opens holders-only cases
         address[3] memory users = [creator, alice, bob];
         for (uint256 i; i < users.length; i++) {
@@ -91,7 +94,7 @@ contract HoldersTest is Test {
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + dur),
                 minHold: minHold,
-                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: inCaseFee, creatorBps: 1_500, platformBps: 500
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: inCaseFee, creatorBps: 1_500, platformBps: 500, terms: inTerms
             })
         );
     }
@@ -142,7 +145,7 @@ contract HoldersTest is Test {
                 fee: 1 ether,
                 endsAt: uint64(block.timestamp + 1 days),
                 minHold: MIN_HOLD,
-                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500, terms: inTerms
             })
         );
         assertEq(b.getCase(_open(MIN_HOLD, 1 days)).creator, address(this));
@@ -214,6 +217,7 @@ contract HoldersTest is Test {
         Briefs.Params memory p = _params();
         p.caseFee = 5 ether;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         vm.expectRevert(Briefs.SettingsChanged.selector); // the creator still sees the old fee
         _open(0, 1 days);
         inCaseFee = 5 ether;
@@ -221,6 +225,7 @@ contract HoldersTest is Test {
         assertEq(imd.balanceOf(treasury), 5 ether);
         p.caseFee = 0; // free to open
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         inCaseFee = 0;
         _open(0, 1 days);
         assertEq(imd.balanceOf(treasury), 5 ether);
@@ -231,6 +236,7 @@ contract HoldersTest is Test {
         Briefs.Params memory p = _params();
         p.maxBrief = 600;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         uint256 c2 = _open(0, 1 days);
         assertEq(b.getCase(c1).maxBrief, 500);
         assertEq(b.getCase(c2).maxBrief, 600);
@@ -248,6 +254,7 @@ contract HoldersTest is Test {
         p.minDuration = 1 hours;
         p.maxDuration = 365 days;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         vm.expectRevert(Briefs.BadDuration.selector);
         _open(0, 30 minutes);
         _open(0, 1 hours);
@@ -261,27 +268,33 @@ contract HoldersTest is Test {
         p.maxBrief = 601; // IMD's question limit
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p = _params();
         p.maxBrief = 99;
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p = _params();
         p.minDuration = 4 minutes;
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p = _params();
         p.maxDuration = 366 days;
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p = _params();
         p.minDuration = 1 days;
         p.maxDuration = 1 days;
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p = _params();
         p.caseFee = 1_001 ether;
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
     }
 
     function test_Settings_LongestQuestionFitsImd() public {

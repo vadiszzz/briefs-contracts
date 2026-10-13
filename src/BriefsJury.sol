@@ -312,12 +312,23 @@ contract BriefsJury is Ownable2Step {
     function refundRelay(uint256 caseId, string calldata words, address author, uint256 deadline, bytes calldata signature, uint256 amount)
         external
     {
-        if (amount == 0) revert NothingToRefund(); // a refund pays something: nobody cancels a signed brief for free
         bytes32 h = _relayHash(caseId, words, author, deadline, signature, true);
+        // the refund that cancels a signed brief pays at least the case's entry fee (the author included: a refund
+        // they pay themselves counts against what the relayer still owes them), so cancelling costs what filing would
+        if (amount == 0 || (relayed[h] == 0 && amount < _feeOf(caseId))) revert NothingToRefund();
         relayed[h] = 2;
         refunded[h] += amount;
         emit RelayRefunded(h, author, amount);
         SafeERC20.safeTransferFrom(court.imd(), msg.sender, author, amount);
+    }
+
+    /// @dev A case's entry fee: word 15 of Briefs.getCase (a static struct, returned inline)
+    function _feeOf(uint256 caseId) private view returns (uint256 fee) {
+        (bool ok, bytes memory r) = address(court).staticcall(abi.encodeWithSignature("getCase(uint256)", caseId));
+        if (!ok || r.length < 16 * 32) revert NothingToRefund();
+        assembly ("memory-safe") {
+            fee := mload(add(r, 512)) // 32 (length) + 15 × 32
+        }
     }
 
     /// @dev The message hash, once `author` is shown to have signed it and it is unused (or, for a refund, not filed).
@@ -397,7 +408,7 @@ contract BriefsJury is Ownable2Step {
 
     function _check(Oracle memory o) private view {
         if (
-            o.signer == address(0) || address(o.requester) == address(0) || o.chainId == 0 || o.hearingGas < 200_000
+            o.signer == address(0) || address(o.requester) == address(0) || o.chainId == 0 || o.hearingGas < 400_000
                 || o.hearingGas > MAX_HEARING_GAS
         ) revert BadOracle();
         // verdict() asks the requester for its answer source on every answer: it must answer (zero is fine).

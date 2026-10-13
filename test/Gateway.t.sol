@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {Test, Vm} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Terms} from "./utils/Terms.sol";
 import {Briefs} from "../src/Briefs.sol";
 import {BriefsText} from "../src/BriefsText.sol";
 import {BriefsJury} from "../src/BriefsJury.sol";
@@ -28,6 +29,7 @@ contract GatewayTest is Test {
     MockIntake intake;
     ImdGatewayRequester adapter;
     Briefs b;
+    uint256 inTerms; // CaseInput.terms: the settings the creator saw
     IntakeDigester dg = new IntakeDigester();
     uint256 key = 0xA77E57;
     address payee = makeAddr("imd-payee");
@@ -66,6 +68,7 @@ contract GatewayTest is Test {
                 maxBrief: 500, reignBps: 0, overtime: 0, finalCap: 0, creatorSetsReign: false, creatorSetsCap: false
             })
         );
+        inTerms = Terms.pack(b.getParams());
         adapter.setClient(address(b));
         address[3] memory users = [creator, alice, bob];
         for (uint256 i; i < users.length; i++) {
@@ -88,7 +91,7 @@ contract GatewayTest is Test {
                 fee: 2 ether,
                 endsAt: uint64(block.timestamp + 1 days),
                 minHold: 0,
-                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500
+                oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500, terms: inTerms
             })
         );
     }

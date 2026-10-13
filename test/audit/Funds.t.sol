@@ -6,6 +6,7 @@ import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Terms} from "../utils/Terms.sol";
 import {Briefs} from "../../src/Briefs.sol";
 import {BriefsText} from "../../src/BriefsText.sol";
 import {BriefsJury} from "../../src/BriefsJury.sol";
@@ -150,6 +151,7 @@ abstract contract AuditBase is Test {
     MockERC20 imd;
     MockRequester requester;
     Briefs b;
+    uint256 inTerms; // CaseInput.terms: the settings the creator saw
     uint32 oid; // the setup new cases name (jury.latest())
     BriefsJury jury;
     uint256 key = 0xB21EF;
@@ -169,6 +171,7 @@ abstract contract AuditBase is Test {
         domain = ImdOracle.domainSeparatorV("2", 1, address(0));
         jury = new BriefsJury(_oracle(vm.addr(key), requester), address(this), address(0));
         b = new Briefs(IERC20(address(imd)), new BriefsText(), jury, treasury, _params());
+        inTerms = Terms.pack(b.getParams());
         address[4] memory users = [creator, alice, bob, carol];
         for (uint256 i; i < users.length; i++) {
             imd.transfer(users[i], 1_000_000 ether);
@@ -198,7 +201,7 @@ abstract contract AuditBase is Test {
 
     function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: CASE_FEE, creatorBps: 1_500, platformBps: 500
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: CASE_FEE, creatorBps: 1_500, platformBps: 500, terms: inTerms
         });
     }
 
@@ -376,6 +379,7 @@ contract FundsTest is AuditBase {
         Briefs.Params memory p = _params();
         p.caseFee = 1_000 ether;
         b.setParams(p); // e.g. front-running the creator's openCase
+        inTerms = Terms.pack(b.getParams());
         uint256 before = imd.balanceOf(creator);
         vm.expectRevert(Briefs.SettingsChanged.selector);
         _case();
@@ -391,6 +395,7 @@ contract FundsTest is AuditBase {
         Briefs.Params memory p = _params();
         p.creatorBps = 0;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         vm.expectRevert(Briefs.SettingsChanged.selector);
         _case();
     }
@@ -481,7 +486,7 @@ contract FundsHandler is Test {
         dur = bound(dur, 10 minutes, 3 days);
         Briefs.CaseInput memory x = Briefs.CaseInput({
             title: "Title", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 1,
-            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0, oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0, caseFee: b.getParams().caseFee, creatorBps: b.getParams().creatorBps, platformBps: b.getParams().platformBps
+            seed: seed, fee: fee, endsAt: uint64(block.timestamp + dur), minHold: 0, oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0, caseFee: b.getParams().caseFee, creatorBps: b.getParams().creatorBps, platformBps: b.getParams().platformBps, terms: Terms.pack(b.getParams())
         });
         vm.prank(a);
         caseIds.push(b.openCase(x));
@@ -670,7 +675,7 @@ contract FundsHandler is Test {
             title: "Holders", task: "Do something funny.", standard: "Funnier wins", opening: "Opening", avatar: 2,
             seed: bound(seed, 10 ether, 1000 ether), fee: bound(fee, 1 ether, 50 ether),
             endsAt: uint64(block.timestamp + bound(dur, 10 minutes, 3 days)), minHold: bound(minHold, 1, 100 ether),
-            oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0, caseFee: b.getParams().caseFee, creatorBps: b.getParams().creatorBps, platformBps: b.getParams().platformBps
+            oracleId: uint32(b.jury().latest()), reignBps: b.getParams().reignBps, finalCap: b.getParams().finalCap, overtime: b.getParams().overtime, lang: 0, maxBrief: 0, caseFee: b.getParams().caseFee, creatorBps: b.getParams().creatorBps, platformBps: b.getParams().platformBps, terms: Terms.pack(b.getParams())
         });
         try b.openCase(x) returns (uint256 c) {
             caseIds.push(c);

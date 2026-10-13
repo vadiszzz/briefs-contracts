@@ -6,6 +6,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {Test, Vm} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {Terms} from "./utils/Terms.sol";
 import {Briefs} from "../src/Briefs.sol";
 import {BriefsText} from "../src/BriefsText.sol";
 import {BriefsJury, IBriefsCourt} from "../src/BriefsJury.sol";
@@ -82,6 +83,7 @@ contract BriefsTest is Test {
     MockERC20 imd;
     MockRequester requester;
     Briefs b;
+    uint256 inTerms; // CaseInput.terms: the settings the creator saw
     uint32 oid; // the setup new cases name (jury.latest())
     BriefsJury jury;
     uint256 key = 0xB21EF;
@@ -101,6 +103,7 @@ contract BriefsTest is Test {
         domain = ImdOracle.domainSeparatorV("2", 1, address(0));
         jury = new BriefsJury(_oracle(vm.addr(key), requester), address(this), address(0));
         b = new Briefs(IERC20(address(imd)), new BriefsText(), jury, treasury, _params());
+        inTerms = Terms.pack(b.getParams());
         address[4] memory users = [creator, alice, bob, carol];
         for (uint256 i; i < users.length; i++) {
             imd.transfer(users[i], 1_000_000 ether);
@@ -142,7 +145,7 @@ contract BriefsTest is Test {
 
     function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: inReign, finalCap: inCap, overtime: inOvertime, lang: inLang, maxBrief: inMax, caseFee: inCaseFee, creatorBps: inCreatorBps, platformBps: inPlatformBps
+            title: TITLE, task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: inReign, finalCap: inCap, overtime: inOvertime, lang: inLang, maxBrief: inMax, caseFee: inCaseFee, creatorBps: inCreatorBps, platformBps: inPlatformBps, terms: inTerms
         });
     }
 
@@ -880,6 +883,7 @@ contract BriefsTest is Test {
         p.quorum = 4;
         p.answerTimeout = 3 minutes;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         uint256 a1 = _file(c, alice, B1);
         Briefs.Brief memory br = b.getBrief(a1);
         assertEq(br.panelSize, 11);
@@ -924,14 +928,17 @@ contract BriefsTest is Test {
         p.platformBps = 1_001;
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p = _params();
         p.quorum = 5; // 5 of 11 is not a majority
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p = _params();
         p.minFee = 0.5 ether; // must exceed the oracle's max price
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
     }
 
     // ------------------------------------------------------------ solvency
@@ -1320,6 +1327,7 @@ contract BriefsTest is Test {
         p.maxOracleFee = 1.5 ether;
         p.minFee = 2 ether;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         vm.prank(carol);
         b.raiseReserve(c); // anyone
         assertEq(b.getCase(c).reserve, 1.5 ether);
@@ -1332,6 +1340,7 @@ contract BriefsTest is Test {
         p.maxOracleFee = 5 ether;
         p.minFee = 6 ether;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         vm.expectRevert(Briefs.BadParams.selector);
         b.raiseReserve(c);
     }
@@ -1407,6 +1416,7 @@ contract BriefsTest is Test {
         Briefs.Params memory p = _params();
         p.maxOracleFee = 0.99 ether;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         b.raiseReserve(c);
         uint256 before = imd.balanceOf(bob);
         _judge(a1, true);
@@ -1479,6 +1489,7 @@ contract BriefsTest is Test {
         p.reignBps = 6_000;
         p.overtime = 10 minutes;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         inReign = 6_000;
         inOvertime = 10 minutes;
     }
@@ -1759,6 +1770,7 @@ contract BriefsTest is Test {
         p.creatorSetsReign = true;
         p.reignBps = 6_000; // ignored in this mode
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         inReign = 2_500;
         uint256 c = _case();
         assertEq(b.getCase(c).reignBps, 2_500);
@@ -1777,6 +1789,7 @@ contract BriefsTest is Test {
         p.overtime = 10 minutes;
         p.finalCap = 15 minutes;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         inReign = 6_000;
         inCap = 15 minutes;
         inOvertime = 10 minutes;
@@ -1804,6 +1817,7 @@ contract BriefsTest is Test {
         p.finalCap = 1 hours; // ignored in this mode
         p.creatorSetsCap = true;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         inCap = 5 minutes;
         inOvertime = 10 minutes;
         uint256 c = _case();
@@ -1824,11 +1838,14 @@ contract BriefsTest is Test {
         p.finalCap = 365 days + 1;
         vm.expectRevert(Briefs.BadParams.selector);
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         p.finalCap = 365 days;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         vm.prank(alice);
         vm.expectRevert();
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
     }
 
     /// a leader can't stretch the case to dilute what earlier leaders earned: time stops at the first deadline
@@ -1927,6 +1944,70 @@ contract BriefsTest is Test {
         assertEq(k.overtimePot, TO_POT); // kept after settlement (pot is 0 then): read it only with an open case
     }
 
+    /// IMD swarm audit, finding 1: a lead taken by a brief filed in the last `overtime` seconds opens overtime even
+    /// when the jury answers after the deadline, so a last-second filing can still be answered
+    function test_Reign_ALateFilingHeardAfterTheDeadlineStillOpensOvertime() public {
+        _reignParams();
+        uint256 c = _case();
+        uint256 end = b.getCase(c).endsAt;
+        _verdictAt(_fileAt(c, alice, B1, end - 11 minutes), true, end - 11 minutes); // no overtime yet
+        assertEq(b.getCase(c).endsAt, end);
+        uint256 b1 = _fileAt(c, bob, B2, end - 1); // a second before the bell
+        _verdictAt(b1, true, end + 1 minutes); // the jury answers after it
+        Briefs.Case memory k = b.getCase(c);
+        assertEq(k.endsAt, end + 11 minutes); // now + overtime
+        assertEq(uint8(k.status), uint8(Briefs.CaseStatus.Open));
+        uint256 c1 = _fileAt(c, carol, "Carol answers in overtime", end + 10 minutes);
+        _verdictAt(c1, true, end + 10 minutes);
+        assertEq(b.getCase(c).endsAt, end + 20 minutes);
+        // the same with junk briefs ahead of it in the queue: the filing time decides, not the verdict's
+        uint256 c2 = _case();
+        uint256 end2 = b.getCase(c2).endsAt;
+        uint256 j1 = _fileAt(c2, bob, "Junk one", end2 - 5 minutes);
+        uint256 real = _fileAt(c2, bob, B2, end2 - 4 minutes);
+        _verdictAt(j1, false, end2 + 30);
+        _verdictAt(real, true, end2 + 60);
+        assertEq(b.getCase(c2).endsAt, end2 + 60 + 10 minutes);
+        assertEq(uint8(b.getCase(c2).status), uint8(Briefs.CaseStatus.Open));
+    }
+
+    /// IMD swarm audit, finding 3: the jury and limits a case fixes for life are what the creator saw
+    function test_Settings_TheJuryAndLimitsAreWhatTheCreatorSaw() public {
+        Briefs.Params memory p = _params();
+        uint256 seen = inTerms;
+        p.panelSize = 3;
+        p.quorum = 2;
+        b.setParams(p);
+        inTerms = seen; // the creator still has the old page open
+        vm.prank(creator);
+        vm.expectRevert(Briefs.SettingsChanged.selector);
+        b.openCase(_input(uint64(block.timestamp + 1 days)));
+        Briefs.Params[4] memory each = [_params(), _params(), _params(), _params()];
+        each[0].answerTimeout = 2 hours;
+        each[1].maxOracleFee = 0.95 ether;
+        each[2].maxBrief = 100;
+        each[3].panelSize = 13;
+        each[3].quorum = 7;
+        for (uint256 i; i < 4; i++) {
+            b.setParams(each[i]);
+            inTerms = Terms.pack(_params());
+            vm.prank(creator);
+            vm.expectRevert(Briefs.SettingsChanged.selector);
+            b.openCase(_input(uint64(block.timestamp + 1 days)));
+            inTerms = Terms.pack(each[i]);
+            assertGt(_case(), 0); // with what the court now says, it opens
+        }
+    }
+
+    /// IMD swarm audit, finding 4: a setup can't give hearings less gas than opening one takes on IMD's Intake
+    function test_Settings_HearingGasHasAFloorThatOpensAHearing() public {
+        BriefsJury.Oracle memory o = BriefsJury.Oracle({signer: vm.addr(key), requester: requester, domain: bytes32(0), chainId: 1, hearingGas: 399_999});
+        vm.expectRevert(BriefsJury.BadOracle.selector);
+        jury.proposeOracle(o);
+        o.hearingGas = 400_000;
+        jury.proposeOracle(o);
+    }
+
     /// overtime is pinned like the share and the limit: the owner can't change it under a pending openCase
     function test_Settings_OvertimeIsWhatTheCreatorSaw() public {
         _reignParams();
@@ -1949,15 +2030,21 @@ contract BriefsTest is Test {
         vm.prank(carol); // a refund of nothing would cancel the brief for free
         vm.expectRevert(BriefsJury.NothingToRefund.selector);
         jury.refundRelay(c, B1, dan, deadline, sig, 0);
+        vm.prank(carol); // nor one of a wei, or anything under the entry fee (IMD swarm audit, finding 2)
+        vm.expectRevert(BriefsJury.NothingToRefund.selector);
+        jury.refundRelay(c, B1, dan, deadline, sig, 1);
+        vm.prank(carol);
+        vm.expectRevert(BriefsJury.NothingToRefund.selector);
+        jury.refundRelay(c, B1, dan, deadline, sig, FEE - 1);
         assertEq(jury.relayed(h), 0);
-        vm.prank(carol); // anyone holding the signature, paying the refund
-        jury.refundRelay(c, B1, dan, deadline, sig, 2 ether);
+        vm.prank(carol); // anyone holding the signature, paying at least the fee
+        jury.refundRelay(c, B1, dan, deadline, sig, FEE);
         assertEq(jury.relayed(h), 2);
-        assertEq(jury.refunded(h), 2 ether);
-        assertEq(imd.balanceOf(dan), 2 ether);
-        vm.prank(carol); // a top-up adds to the record
+        assertEq(jury.refunded(h), FEE);
+        assertEq(imd.balanceOf(dan), FEE);
+        vm.prank(carol); // a top-up adds to the record, any amount
         jury.refundRelay(c, B1, dan, deadline, sig, 1 ether);
-        assertEq(jury.refunded(h), 3 ether);
+        assertEq(jury.refunded(h), FEE + 1 ether);
         vm.prank(alice);
         vm.expectRevert(BriefsJury.BadSignature.selector);
         b.fileBriefFor(c, B1, dan, deadline, sig);
@@ -1967,7 +2054,7 @@ contract BriefsTest is Test {
         b.fileBriefFor(c, B2, dan, deadline, sig2);
         vm.prank(carol);
         vm.expectRevert(BriefsJury.BadSignature.selector);
-        jury.refundRelay(c, B2, dan, deadline, sig2, 1 ether);
+        jury.refundRelay(c, B2, dan, deadline, sig2, FEE);
         // a forged signature refunds nobody, and the jury never holds IMD
         bytes memory forged = _relaySig(0xBAD, c, "Something else", deadline);
         vm.prank(carol);
@@ -1987,6 +2074,7 @@ contract BriefsTest is Test {
         p.creatorSetsReign = true;
         p.creatorSetsCap = true;
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         inOvertime = p.overtime;
         inReign = uint16(uint256(keccak256(abi.encode(seed, "r"))) % 9_001);
         inCap = uint32(uint256(keccak256(abi.encode(seed, "c"))) % 3 hours);

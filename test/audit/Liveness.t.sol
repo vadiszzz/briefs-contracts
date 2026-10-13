@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Terms} from "../utils/Terms.sol";
 import {Briefs} from "../../src/Briefs.sol";
 import {BriefsText} from "../../src/BriefsText.sol";
 import {BriefsJury} from "../../src/BriefsJury.sol";
@@ -102,6 +103,7 @@ contract LivenessAudit is Test {
     IERC20 imd;
     MockRequester requester;
     Briefs b;
+    uint256 inTerms; // CaseInput.terms: the settings the creator saw
     uint32 oid; // the setup new cases name (jury.latest())
     BriefsJury jury;
     uint256 key = 0xB21EF;
@@ -125,6 +127,7 @@ contract LivenessAudit is Test {
         domain = ImdOracle.domainSeparatorV("2", 1, address(0));
         jury = new BriefsJury(_oracle(vm.addr(key), requester), address(this), address(0));
         b = new Briefs(imd, new BriefsText(), jury, treasury, _params());
+        inTerms = Terms.pack(b.getParams());
         address[4] memory users = [creator, alice, bob, carol];
         for (uint256 i; i < users.length; i++) {
             imd.transfer(users[i], 1_000_000 ether);
@@ -154,7 +157,7 @@ contract LivenessAudit is Test {
 
     function _input(uint64 endsAt) internal view returns (Briefs.CaseInput memory) {
         return Briefs.CaseInput({
-            title: "Dragon Jokes", task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500
+            title: "Dragon Jokes", task: TASK, standard: STANDARD, opening: OPENING, avatar: 3, seed: SEED, fee: FEE, endsAt: endsAt, minHold: 0, oracleId: oid, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500, terms: inTerms
         });
     }
 
@@ -227,6 +230,7 @@ contract LivenessAudit is Test {
         Briefs.Params memory p = _params();
         p.maxOracleFee = 0.4 ether; // under IMD's 0.5 price
         b.setParams(p);
+        inTerms = Terms.pack(b.getParams());
         uint256 b1 = _file(c, bob, B2); // entries only need reserve < fee
         assertEq(b.getCase(c).hearing, b1);
         assertEq(b.getBrief(b1).oracleReserve, ORACLE_FEE);
@@ -472,7 +476,7 @@ contract LivenessAudit is Test {
 
     function test_Fixed_M3_MaxSizeBriefIsHeardWithTightHearingGas() public {
         BriefsJury.Oracle memory o = _oracle(vm.addr(key), requester);
-        o.hearingGas = 300_000; // allowed (>= 200k); MockRequester itself needs ~60k, so a "measured" value
+        o.hearingGas = 400_000; // allowed (>= 400k, the floor); MockRequester itself needs ~60k, so a "measured" value
         jury.proposeOracle(o);
         vm.warp(block.timestamp + 7 days);
         jury.applyOracle();

@@ -255,3 +255,19 @@ live time-in-the-lead ticker (site and server). No Critical, High or Medium issu
 | 8 | Info | `overtimePot` is kept after settlement while `pot` goes to 0; demo mode now takes English briefs only; a database migrated mid-case shows `overtime_pot` 0 until the case's next event | Accepted (the API ignores it once settled; v2 deploys fresh contracts) |
 
 Briefs is 24,522 bytes, 54 under the limit: the next contract change needs room made first.
+
+## Tenth review: the fourth IMD swarm audit, of v2 (October 2026)
+
+[IMD job 0b0d0d84](https://explorer.imd.fun/jobs/0b0d0d84-c7e0-4dd4-b87e-d94e2e5150d9) on commit `c29c658`: four
+specialists and a judge. 1 Medium, 2 Low, 2 Info; each fixed with a test, or written down.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Overtime keyed on the verdict's time: a brief filed in the last seconds (or behind junk briefs) is judged after the deadline, takes the lead without opening overtime, and the case settles in the same call, so a last-second snipe can't be answered | `_newLeader` also opens overtime when the brief was filed in the last `overtime` seconds (`filedAt + overtime > endsAt`), whenever the jury answers; a brief filed earlier and heard late still adds none. `test_Reign_ALateFilingHeardAfterTheDeadlineStillOpensOvertime` (the auditors' proof, plus the junk-queue variant) |
+| 2 | Low | `refundRelay` of 1 wei cancelled a signed brief: the author (or anyone holding the signature) could void a paid filing for free | The first refund of a message must pay at least the case's entry fee (read from `getCase`); top-ups any amount. Cancelling costs what filing would, since a self-paid refund counts against what the relayer still owes. A payment below the fee is refunded by hand (alerted). `test_Relay_ARefundedSignatureCanNeverBeFiled` |
+| 3 | Low | `openCase` pinned only part of the settings: panelSize, quorum, answerTimeout, maxOracleFee (the jury reserve) and the court's maxBrief could change under a pending openCase | `CaseInput.terms` packs them; any difference reverts `SettingsChanged`. The site sends what it showed and names a change. `test_Settings_TheJuryAndLimitsAreWhatTheCreatorSaw` |
+| 4 | Info | `hearingGas` could be set to 200k, below the ~265k opening a hearing on IMD's Intake takes: every hearing would stall and the leader win by `skipStalled` | The floor is 400k. `test_Settings_HearingGasHasAFloorThatOpensAHearing` |
+| 5 | Info | A creator can play against their own opening brief from a second wallet and earn the time before the first outside challenger | Accepted and documented: the opening brief earns no time, its author can still play like anyone; nothing on chain can tell wallets apart |
+
+To fit the new checks Briefs builds with 20 optimizer runs (it is 24,445 bytes, 131 under the limit); gas per call
+rises slightly, well under the 7M the site and keeper send.

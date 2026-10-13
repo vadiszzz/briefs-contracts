@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Terms} from "../utils/Terms.sol";
 import {Briefs} from "../../src/Briefs.sol";
 import {BriefsText} from "../../src/BriefsText.sol";
 import {BriefsJury} from "../../src/BriefsJury.sol";
@@ -103,7 +104,7 @@ contract OracleAuditTest is Test {
         c = g.openCase(
             Briefs.CaseInput({
                 title: "Dragon Jokes", task: TASK, standard: STANDARD, opening: OPENING, avatar: 1, seed: 100 ether,
-                fee: 5 ether, endsAt: uint64(block.timestamp + 1 days), minHold: 0, oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500
+                fee: 5 ether, endsAt: uint64(block.timestamp + 1 days), minHold: 0, oracleId: 0, reignBps: 0, finalCap: 0, overtime: 0, lang: 0, maxBrief: 0, caseFee: 2 ether, creatorBps: 1_500, platformBps: 500, terms: Terms.pack(_params())
             })
         );
     }
