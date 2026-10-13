@@ -284,3 +284,8 @@ or above; 3 Low, 2 Info.
 | 3 | Low | The overtime window was measured from the current deadline: after an earlier leader pushed it, a brief filed in the original window and judged late could take the lead and settle the case unanswered | The window is measured from the first deadline: `filedAt + overtime > reignEnd` (any brief filed in the last `overtime` seconds before it, or after it). `test_Reign_AnEarlierPushDoesntTakeALateFilingOutOfItsWindow` |
 | 4 | Info | Anyone can apply a ready oracle proposal ahead of a pending openCase, which then reverts WrongOracle | Accepted: the site reads the setup right before sending and explains WrongOracle; the owner applies proposals promptly |
 | 5 | Info | The time-in-the-lead fuzz heard one brief at a time, never a docket | It now files 1 to 3 briefs per step and hears them in order, some after the deadline; the same assertions hold |
+
+After the eleventh review, an independent internal check of its two contract fixes (the overtime window measured from
+`reignEnd`, and `_feeOf` refusing a case that doesn't exist) found nothing: no case kept open past `finalEnd`, no early
+or blocked settlement, reign accounting untouched, `fee` read from the right word and never 0 for a real case.
+`verify/standard-input.json` is rebuilt for v2 and compiles to the same bytecode as the build, byte for byte.
