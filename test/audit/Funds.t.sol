@@ -630,11 +630,21 @@ contract FundsHandler is Test {
         } catch {}
     }
 
-    /// one of the actors claims what a settled case owes them (the pot and their time-as-leader share)
-    function claim(uint256 ci, uint256 who) external {
+    /// anyone (any actor) sends a claim for one of the actors: only the payee may gain, by exactly what it is owed
+    function claim(uint256 ci, uint256 who, uint256 sender) external {
         if (caseIds.length == 0) return;
-        vm.prank(actors[who % 4]);
-        try b.claim(caseIds[ci % caseIds.length], actors[who % 4]) {} catch {}
+        uint256 c = caseIds[ci % caseIds.length];
+        address payee = actors[who % 4];
+        address from = actors[sender % 4];
+        Briefs.Case memory k = b.getCase(c);
+        uint256 owed = (payee == k.winner ? k.pot : 0) + (k.reignTotal == 0 ? 0 : (k.reignPool * b.reignOf(c, payee)) / k.reignTotal);
+        uint256 before = imd.balanceOf(payee) + b.unpaid(payee);
+        uint256 fromBefore = imd.balanceOf(from);
+        vm.prank(from);
+        try b.claim(c, payee) {
+            if (k.status == Briefs.CaseStatus.Settled) require(imd.balanceOf(payee) + b.unpaid(payee) == before + owed, "claim paid the wrong amount");
+            if (from != payee) require(imd.balanceOf(from) == fromBefore, "the sender gained");
+        } catch {}
     }
 
     function raiseReserve(uint256 ci) external {

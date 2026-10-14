@@ -319,8 +319,8 @@ contract LivenessAudit is Test {
         _judge(b1, false); // DENIED: alice wins, her pot is held for her
         assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
         assertEq(b.getCase(c).winner, alice);
-        vm.prank(alice);
         uint256 owed = b.getCase(c).pot;
+        vm.prank(alice);
         b.claim(c, alice); // the token refuses: the pot is held for her
         assertEq(b.unpaid(alice), owed);
         assertEq(b.getCase(c).pot, 0);

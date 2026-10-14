@@ -118,7 +118,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     enum CaseStatus {
         None,
         Open, // entries until endsAt, then the docket is heard to the end
-        Settled // paid to the final precedent; closed for good
+        Settled // closed for good; each player claims what it owes them (claim)
     }
 
     struct Case {
@@ -205,7 +205,8 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     mapping(uint256 => uint256[]) public docketOf;
     mapping(bytes32 => uint256) public briefOfRequest;
     /// @notice seconds an author led a case before its first deadline (as a challenger who took the lead); 0 once
-    ///         they claimed their share (claim; the Claimed event keeps the seconds)
+    ///         they claimed their share (claim; the Claimed event keeps the seconds). A share that comes to 0 (a case
+    ///         with no pool for time in the lead) can't be claimed, so its seconds stay
     mapping(uint256 => mapping(address => uint256)) public reignOf;
 
     // ---------------------------------------------------------------- events

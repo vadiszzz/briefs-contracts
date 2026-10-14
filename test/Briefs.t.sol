@@ -1518,8 +1518,9 @@ contract BriefsTest is Test {
 
     /// the final leader of a settled case claims (nothing is paid out by itself)
     function _claimPot(uint256 c) internal {
-        vm.prank(b.getCase(c).winner);
-        b.claim(c, b.getCase(c).winner);
+        address winner = b.getCase(c).winner;
+        vm.prank(winner);
+        b.claim(c, winner);
     }
 
     /// 24 h case: alice leads from 6 h to 12 h, bob from 12 h to the end. The first 6 h are nobody's, so the pool for
@@ -1568,7 +1569,7 @@ contract BriefsTest is Test {
     }
 
     /// nothing is paid out by itself: an open case owes nobody yet, and only the final leader can take the pot
-    function test_Claim_OnlyThePayeeClaimsAndOnlyOnceSettled() public {
+    function test_Claim_OnlyThePayeeIsPaidAndOnlyOnceSettled() public {
         uint256 c = _case();
         _judge(_file(c, alice, B1), true);
         vm.prank(alice);
@@ -1611,6 +1612,21 @@ contract BriefsTest is Test {
         assertEq(imd.balanceOf(alice), aliceBefore + k.reignPool / 3);
         vm.expectRevert(Briefs.NothingToClaim.selector);
         b.claim(c, alice);
+    }
+
+    /// no claim while a brief filed on time still waits to be heard after the deadline, nor on a case that doesn't exist
+    function test_Claim_NothingWhileTheDocketIsStillHeardOrForNoCase() public {
+        uint256 c = _case();
+        _judge(_file(c, alice, B1), true);
+        uint256 b1 = _file(c, bob, B2); // being heard
+        vm.warp(b.getCase(c).endsAt);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claim(c, alice);
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Open));
+        _judge(b1, false); // the docket is clear: the case settles by itself
+        b.claim(c, alice);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claim(c + 1, alice);
     }
 
     /// the final leader of a case that is ready to settle claims in one transaction: the claim settles it first
@@ -2028,7 +2044,7 @@ contract BriefsTest is Test {
         assertEq(k.winner, bob);
         assertEq(k.pot, pot - pool, "final leader gets the rest");
         assertEq(imd.balanceOf(bob), bobBefore);
-        assertEq(k.overtimePot, TO_POT); // kept after settlement (pot is 0 then): read it only with an open case
+        assertEq(k.overtimePot, TO_POT); // kept after settlement (pot is the unclaimed prize then): read it only with an open case
     }
 
     /// IMD swarm audit, finding 1: a lead taken by a brief filed in the last `overtime` seconds opens overtime even
@@ -2269,8 +2285,16 @@ contract BriefsTest is Test {
         assertEq(sum, k2.reignTotal, "seconds add up");
         if (k2.finalEnd != 0) assertLe(k2.endsAt, k2.finalEnd);
         for (uint256 j; j < 5; j++) {
-            if (b.reignOf(c, who5[j]) == 0 && who5[j] != k2.winner) continue;
-            vm.prank(who5[j]);
+            // a share that rounds to 0 (or a case with no pool) can't be claimed: its seconds stay
+            uint256 share = k2.reignTotal == 0 ? 0 : (k2.reignPool * b.reignOf(c, who5[j])) / k2.reignTotal;
+            if (share == 0 && who5[j] != k2.winner) {
+                if (b.reignOf(c, who5[j]) != 0) {
+                    vm.expectRevert(Briefs.NothingToClaim.selector);
+                    b.claim(c, who5[j]);
+                }
+                continue;
+            }
+            vm.prank(carol); // anyone may send it; only the payee is paid
             b.claim(c, who5[j]);
         }
         k2 = b.getCase(c);

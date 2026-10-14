@@ -327,7 +327,32 @@ What we checked (and an independent internal review of the change confirmed):
 | 4 | Info | No test for a blocked winner's claim, or a leader claiming after the winner | `test_Fixed_BlockedLeaderNoLongerBricksTheCase` holds and releases the claim; the relayer test claims after the winner |
 | 5 | Info | Stale comments (`canSettle` "would pay", the seed "all goes to the winner") | Fixed |
 
-Tests: `test_Claim_OnlyThePayeeClaimsAndOnlyOnceSettled`, `test_Claim_SettlesACaseThatIsReady`,
+Tests: `test_Claim_OnlyThePayeeIsPaidAndOnlyOnceSettled`, `test_Claim_SettlesACaseThatIsReady`,
 `test_Claim_ARelayerClaimsForAPlayerAndOnlyThePlayerIsPaid`, and every settlement test now claims explicitly. Briefs is
 30 bytes under the 24 KB limit. `verify/standard-input.json` is rebuilt and compiles to the build's bytecode byte for
 byte.
+
+## Thirteenth review: a local audit of the claims change (October 2026)
+
+Three independent reviewers, each on its own: funds (with an extended invariant run where anyone claims for anyone,
+128 runs × 250 calls), liveness and edge cases, and the server and site paths for claims. No High or Medium finding in
+the contracts. Every contract claim was backed by a Foundry PoC.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | A claim sent for a player while the IMD token refuses payments to them (its block list) moves their prize into `unpaid`, and `claimUnpaid` pays its caller only: a player with no gas here then needs gas after all | Accepted on chain: `claimUnpaid(address)` costs 43 bytes and Briefs has 30 left. Nothing is lost; the old push at settlement did the same. Off chain, the keeper sends a claim only after checking that the token takes a payment to the player (a simulated transfer from Briefs); otherwise the site says to try later |
+| 2 | Info | With no pool for time in the lead (`reignBps` 0, or a share that rounds to 0) a leader's seconds can never be cleared: `claim` reverts `NothingToClaim` | Accepted (no funds). The `reignOf` NatSpec says so; the server decides what is owed from the amount, not the seconds; the time-in-the-lead fuzz expects the revert for those leaders instead of a claim |
+| 3 | Info | Tests: `vm.prank` used up by a view call in the claim's own arguments, so the "winner claims" helpers really claimed from the test contract | The address is read first, then pranked |
+| 4 | Info | Stale comments (`Settled // paid to the final precedent`, a test saying a settled pot is 0, a misnamed test); on the site a settled card said PAID TO THE WINNER | Fixed (the card says WON) |
+| 5 | Info | No test of a third party claiming in the fuzzers, of a claim while a brief is still heard after the deadline, or for a case that doesn't exist | The funds invariant handler now claims from any actor for any actor and checks the payee got exactly its share and the sender nothing; `test_Claim_NothingWhileTheDocketIsStillHeardOrForNoCase` |
+
+Earlier text that says a settled case's pot "goes to 0" (the ninth review's #8) predates claims: a settled pot is now the
+final leader's unclaimed prize.
+
+Off chain (server and site), fixed: the gasless claim reported success when the keeper had dropped it (the keeper now
+retries for about half a minute and records what happened, `GET /api/claim/<case>/<who>`, and the site says so if the
+claim didn't go out); anyone could make the keeper pay gas for every unclaimed claim and hold up its round (the server
+now refuses a wallet that has ETH for the gas, and sends at most 5 claims a round); the profile built a whole case page
+per settled case (now a light query of what is still owed, which also covers cases older than the 300 most recent);
+cases ready to settle are listed with projected amounts and claimable by every leader, not only the winner; Telegram
+skips a "claim it" message when the claim already landed, and tells the winner the pot plus their own lead share.
