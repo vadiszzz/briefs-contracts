@@ -285,9 +285,11 @@ contract LivenessAudit is Test {
         vm.warp(b.getCase(c).endsAt); // entries closed; a1 is the last hearing
         BlacklistERC20(address(imd)).setBlocked(alice, true);
         uint256 snap = vm.snapshotState();
-        _judge(a1, true); // COOKED lands and the case settles; alice's pot is held for her
+        _judge(a1, true); // APPROVED lands and the case settles; alice's claim is held for her
         assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
         assertEq(b.getCase(c).winner, alice);
+        vm.prank(alice);
+        b.claim(c, alice);
         uint256 held = b.unpaid(alice);
         assertGt(held, SEED);
         assertEq(b.unpaidTotal(), held);
@@ -317,7 +319,18 @@ contract LivenessAudit is Test {
         _judge(b1, false); // DENIED: alice wins, her pot is held for her
         assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
         assertEq(b.getCase(c).winner, alice);
-        assertGt(b.unpaid(alice), 0);
+        vm.prank(alice);
+        uint256 owed = b.getCase(c).pot;
+        b.claim(c, alice); // the token refuses: the pot is held for her
+        assertEq(b.unpaid(alice), owed);
+        assertEq(b.getCase(c).pot, 0);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claim(c, alice); // held once, never twice
+        BlacklistERC20(address(imd)).setBlocked(alice, false);
+        uint256 before = imd.balanceOf(alice);
+        vm.prank(alice);
+        b.claimUnpaid();
+        assertEq(imd.balanceOf(alice), before + owed);
     }
 
     function test_Fixed_BlockedQueuedAuthorNoLongerBlocksTheVerdict() public {

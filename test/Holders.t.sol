@@ -197,6 +197,7 @@ contract HoldersTest is Test {
         vm.warp(block.timestamp + 1 days);
         uint256 before = imd.balanceOf(address(this));
         b.settle(c1);
+        b.claim(c1, address(this));
         assertEq(imd.balanceOf(address(this)), before + 100 ether);
     }
 

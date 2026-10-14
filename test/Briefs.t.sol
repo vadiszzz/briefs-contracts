@@ -509,8 +509,11 @@ contract BriefsTest is Test {
         Briefs.Case memory k = b.getCase(c);
         assertEq(uint8(k.status), uint8(Briefs.CaseStatus.Settled));
         assertEq(k.winner, bob);
-        assertEq(k.pot, 0);
-        assertEq(imd.balanceOf(bob), bobBefore + SEED + 2 * TO_POT); // 100% of the pot
+        assertEq(k.pot, SEED + 2 * TO_POT); // 100% of the pot, bob's to claim
+        assertEq(imd.balanceOf(bob), bobBefore);
+        _claimPot(c);
+        assertEq(b.getCase(c).pot, 0);
+        assertEq(imd.balanceOf(bob), bobBefore + SEED + 2 * TO_POT);
     }
 
     function test_NoEntriesTheCreatorsOpeningTakesTheSeed() public {
@@ -520,8 +523,9 @@ contract BriefsTest is Test {
         vm.warp(block.timestamp + 1 days);
         uint256 before = imd.balanceOf(creator);
         b.settle(c);
-        assertEq(imd.balanceOf(creator), before + SEED);
         assertEq(b.getCase(c).winner, creator);
+        _claimPot(c);
+        assertEq(imd.balanceOf(creator), before + SEED);
         vm.expectRevert(Briefs.TooEarly.selector);
         b.settle(c); // once
     }
@@ -691,6 +695,7 @@ contract BriefsTest is Test {
         assertEq(uint8(_status(a1)), uint8(Briefs.BriefStatus.Unheard));
         assertEq(imd.balanceOf(alice), aliceBefore + FEE); // never heard: the whole fee comes back
         assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+        _claimPot(c);
         assertEq(imd.balanceOf(creator), creatorBefore + SEED); // the pot never grew from an unheard brief
         assertEq(b.getCase(c).creatorOwed, 0);
         assertEq(b.platformOwed(), 0);
@@ -770,6 +775,7 @@ contract BriefsTest is Test {
         assertEq(uint8(_status(c1)), uint8(Briefs.BriefStatus.Unheard));
         assertEq(imd.balanceOf(carol), carolBefore + FEE);
         assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+        _claimPot(c);
         assertEq(imd.balanceOf(alice), aliceBefore + SEED + TO_POT); // only alice's heard fee ever reached the pot
         assertEq(b.getCase(c).creatorOwed, TO_CREATOR);
         assertEq(b.platformOwed(), TO_PLATFORM);
@@ -820,6 +826,7 @@ contract BriefsTest is Test {
         _judge(a1, true);
         _judge(b1, false);
         assertEq(b.getCase(c).winner, alice);
+        _claimPot(c); // claims work while paused
         assertEq(b.getCase(c).pot, 0);
         b.setPaused(false);
         vm.prank(creator);
@@ -1012,6 +1019,7 @@ contract BriefsTest is Test {
             b.claimCreator(one);
         }
         if (b.platformOwed() != 0) b.withdrawPlatform();
+        _claimPot(c);
         assertEq(imd.balanceOf(address(b)), 0, "nothing left behind");
         uint256 end;
         for (uint256 i; i < who.length; i++) end += imd.balanceOf(who[i]);
@@ -1508,6 +1516,12 @@ contract BriefsTest is Test {
         b.fulfill(briefId, a, sig);
     }
 
+    /// the final leader of a settled case claims (nothing is paid out by itself)
+    function _claimPot(uint256 c) internal {
+        vm.prank(b.getCase(c).winner);
+        b.claim(c, b.getCase(c).winner);
+    }
+
     /// 24 h case: alice leads from 6 h to 12 h, bob from 12 h to the end. The first 6 h are nobody's, so the pool for
     /// time as the leader is 60% × 18/24 of the pot, split 6:12; the final leader (bob) also takes the rest
     function test_Reign_ThePotIsSplitByTimeAsTheLeaderAndTheFinalLeader() public {
@@ -1531,19 +1545,88 @@ contract BriefsTest is Test {
         assertEq(b.reignOf(c, alice), 6 hours);
         assertEq(b.reignOf(c, bob), 12 hours);
         assertEq(b.reignOf(c, creator), 0); // the opening brief earns no time
-        assertEq(imd.balanceOf(bob), bobBefore + pot - k.reignPool); // the final share, pushed at settlement
+        assertEq(imd.balanceOf(bob), bobBefore); // nothing is paid out by itself
+        assertEq(k.pot, pot - k.reignPool); // the final leader's, to claim
         uint256 aliceBefore = imd.balanceOf(alice);
-        vm.prank(carol);
-        b.claimReign(c, alice); // anyone may pay it out
+        vm.prank(alice);
+        b.claim(c, alice);
         assertEq(imd.balanceOf(alice), aliceBefore + k.reignPool / 3);
-        b.claimReign(c, bob);
+        vm.prank(bob);
+        vm.expectEmit(address(b));
+        emit Briefs.Claimed(c, bob, 12 hours, (k.reignPool * 2) / 3, pot - k.reignPool);
+        b.claim(c, bob); // the final share and the lead share in one go
         assertEq(imd.balanceOf(bob), bobBefore + pot - k.reignPool + (k.reignPool * 2) / 3);
+        assertEq(b.getCase(c).pot, 0);
+        vm.prank(bob);
         vm.expectRevert(Briefs.NothingToClaim.selector);
-        b.claimReign(c, bob); // once
+        b.claim(c, bob); // once
+        vm.prank(carol);
         vm.expectRevert(Briefs.NothingToClaim.selector);
-        b.claimReign(c, carol); // never led
+        b.claim(c, carol); // never led
         assertLe(b.getCase(c).reignPaid, k.reignPool);
         assertLt(k.reignPool - b.getCase(c).reignPaid, 3); // rounding dust only
+    }
+
+    /// nothing is paid out by itself: an open case owes nobody yet, and only the final leader can take the pot
+    function test_Claim_OnlyThePayeeClaimsAndOnlyOnceSettled() public {
+        uint256 c = _case();
+        _judge(_file(c, alice, B1), true);
+        vm.prank(alice);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claim(c, alice); // still open
+        vm.warp(b.getCase(c).endsAt);
+        uint256 aliceBefore = imd.balanceOf(alice);
+        b.settle(c);
+        assertEq(imd.balanceOf(alice), aliceBefore);
+        uint256 prize = b.getCase(c).pot;
+        assertEq(prize, SEED + TO_POT);
+        vm.prank(bob);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claim(c, bob); // not bob's
+        vm.prank(alice);
+        b.claim(c, alice);
+        assertEq(imd.balanceOf(alice), aliceBefore + prize);
+    }
+
+    /// anyone may send a claim (a relayer, for a player with no gas here), but the IMD only ever goes to its payee;
+    /// a leader who didn't win claims their share before or after the winner, and only once
+    function test_Claim_ARelayerClaimsForAPlayerAndOnlyThePlayerIsPaid() public {
+        _reignParams();
+        uint256 t0 = block.timestamp;
+        uint256 c = _case();
+        _verdictAt(_fileAt(c, alice, B1, t0 + 6 hours), true, t0 + 6 hours);
+        _verdictAt(_fileAt(c, bob, B2, t0 + 12 hours), true, t0 + 12 hours);
+        vm.warp(t0 + 1 days);
+        b.settle(c);
+        Briefs.Case memory k = b.getCase(c);
+        uint256 carolBefore = imd.balanceOf(carol);
+        uint256 bobBefore = imd.balanceOf(bob);
+        vm.prank(carol); // the relayer
+        b.claim(c, bob);
+        assertEq(imd.balanceOf(carol), carolBefore);
+        assertEq(imd.balanceOf(bob), bobBefore + k.pot + (k.reignPool * 2) / 3);
+        uint256 aliceBefore = imd.balanceOf(alice);
+        vm.prank(carol);
+        b.claim(c, alice); // after the winner
+        assertEq(imd.balanceOf(alice), aliceBefore + k.reignPool / 3);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claim(c, alice);
+    }
+
+    /// the final leader of a case that is ready to settle claims in one transaction: the claim settles it first
+    function test_Claim_SettlesACaseThatIsReady() public {
+        uint256 c = _case();
+        _judge(_file(c, alice, B1), true);
+        vm.warp(b.getCase(c).endsAt);
+        vm.prank(bob);
+        vm.expectRevert(Briefs.NothingToClaim.selector);
+        b.claim(c, bob); // settles, then owes bob nothing: all of it reverts
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Open));
+        uint256 before = imd.balanceOf(alice);
+        vm.prank(alice);
+        b.claim(c, alice);
+        assertEq(uint8(b.getCase(c).status), uint8(Briefs.CaseStatus.Settled));
+        assertEq(imd.balanceOf(alice), before + SEED + TO_POT);
     }
 
     /// nobody ever took the lead: the creator's opening brief takes the whole pot, as before
@@ -1556,6 +1639,8 @@ contract BriefsTest is Test {
         uint256 pot = b.getCase(c).pot;
         b.settle(c);
         assertEq(b.getCase(c).reignPool, 0);
+        vm.prank(creator);
+        b.claim(c, creator);
         assertEq(imd.balanceOf(creator), before + pot);
     }
 
@@ -1689,6 +1774,8 @@ contract BriefsTest is Test {
         vm.warp(b.getCase(c).endsAt);
         uint256 pot = b.getCase(c).pot;
         b.settle(c);
+        vm.prank(dan);
+        b.claim(c, dan);
         assertEq(imd.balanceOf(dan), pot);
     }
 
@@ -1939,8 +2026,8 @@ contract BriefsTest is Test {
         uint256 pool = ((pot - TO_POT) * 6_000 * k.reignTotal) / (10_000 * (end0 - k.createdAt));
         assertEq(k.reignPool, pool);
         assertEq(k.winner, bob);
-        assertEq(imd.balanceOf(bob) - bobBefore, pot - pool, "final leader gets the rest");
-        assertEq(k.pot, 0);
+        assertEq(k.pot, pot - pool, "final leader gets the rest");
+        assertEq(imd.balanceOf(bob), bobBefore);
         assertEq(k.overtimePot, TO_POT); // kept after settlement (pot is 0 then): read it only with an open case
     }
 
@@ -2182,14 +2269,16 @@ contract BriefsTest is Test {
         assertEq(sum, k2.reignTotal, "seconds add up");
         if (k2.finalEnd != 0) assertLe(k2.endsAt, k2.finalEnd);
         for (uint256 j; j < 5; j++) {
-            if (b.reignOf(c, who5[j]) != 0) b.claimReign(c, who5[j]);
+            if (b.reignOf(c, who5[j]) == 0 && who5[j] != k2.winner) continue;
+            vm.prank(who5[j]);
+            b.claim(c, who5[j]);
         }
         k2 = b.getCase(c);
         assertLe(k2.reignPaid, k2.reignPool);
         assertLt(k2.reignPool - k2.reignPaid, 5);
         assertEq(
             imd.balanceOf(address(b)),
-            b.platformOwed() + k2.creatorOwed + (k2.reignPool - k2.reignPaid) + b.unpaidTotal(),
+            b.platformOwed() + k2.creatorOwed + k2.pot + (k2.reignPool - k2.reignPaid) + b.unpaidTotal(),
             "solvent to the wei"
         );
     }

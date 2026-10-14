@@ -302,6 +302,8 @@ contract FundsTest is AuditBase {
         assertEq(uint8(b.getBrief(v).status), uint8(Briefs.BriefStatus.Unheard));
         assertEq(imd.balanceOf(bob) - bobBefore, FEE, "bob gets his whole fee back");
         assertEq(b.getCase(c).winner, alice);
+        vm.prank(alice);
+        b.claim(c, alice);
         assertEq(imd.balanceOf(alice) - aliceBefore, potBefore, "the leader wins nothing of bob's fee");
         assertEq(b.getCase(c).creatorOwed, creatorOwedBefore);
         assertEq(b.platformOwed(), platformBefore);
@@ -370,6 +372,8 @@ contract FundsTest is AuditBase {
         vm.prank(creator);
         vm.expectRevert(Briefs.NothingToClaim.selector); // a mistrial splits nothing: the author got the rest back
         b.claimCreator(ids);
+        vm.prank(creator);
+        b.claim(c, creator); // the opening brief's pot
         assertEq(imd.balanceOf(address(b)), ORACLE_FEE, "0.5 IMD stuck with no liability and no way out");
     }
 
@@ -626,10 +630,11 @@ contract FundsHandler is Test {
         } catch {}
     }
 
-    /// pays a settled case's time-as-leader share to one of the actors (anyone may)
-    function claimReign(uint256 ci, uint256 who) external {
+    /// one of the actors claims what a settled case owes them (the pot and their time-as-leader share)
+    function claim(uint256 ci, uint256 who) external {
         if (caseIds.length == 0) return;
-        try b.claimReign(caseIds[ci % caseIds.length], actors[who % 4]) {} catch {}
+        vm.prank(actors[who % 4]);
+        try b.claim(caseIds[ci % caseIds.length], actors[who % 4]) {} catch {}
     }
 
     function raiseReserve(uint256 ci) external {
@@ -708,8 +713,8 @@ contract FundsInvariantTest is StdInvariant, AuditBase {
             uint256 c = h.caseIds(i);
             Briefs.Case memory k = b.getCase(c);
             total += k.creatorOwed;
-            if (k.status == Briefs.CaseStatus.Open) total += k.pot;
-            else total += k.reignPool - k.reignPaid; // settled: time-as-leader shares not yet paid
+            total += k.pot; // settled: the final leader's prize until claimed
+            if (k.status == Briefs.CaseStatus.Settled) total += k.reignPool - k.reignPaid; // time-as-leader shares not yet claimed
             uint256 queued = b.waiting(c) - (k.hearing != 0 ? 1 : 0);
             for (uint256 j; j < queued; j++) {
                 require(b.getBrief(b.docketOf(c, k.head + j)).status == Briefs.BriefStatus.Queued, "waiting brief not queued");
@@ -731,15 +736,5 @@ contract FundsInvariantTest is StdInvariant, AuditBase {
     /// forge-config: default.invariant.depth = 200
     function invariant_PlatformShareNeverLocks() public view {
         assertFalse(h.shareLocked());
-    }
-
-    /// settled cases hold no pot
-    /// forge-config: default.invariant.runs = 64
-    /// forge-config: default.invariant.depth = 200
-    function invariant_SettledPotsAreZero() public view {
-        for (uint256 i; i < h.casesLength(); i++) {
-            Briefs.Case memory k = b.getCase(h.caseIds(i));
-            if (k.status == Briefs.CaseStatus.Settled) assertEq(k.pot, 0);
-        }
     }
 }

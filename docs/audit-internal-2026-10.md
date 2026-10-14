@@ -289,3 +289,45 @@ After the eleventh review, an independent internal check of its two contract fix
 `reignEnd`, and `_feeOf` refusing a case that doesn't exist) found nothing: no case kept open past `finalEnd`, no early
 or blocked settlement, reign accounting untouched, `fee` read from the right word and never 0 for a real case.
 `verify/standard-input.json` is rebuilt for v2 and compiles to the same bytecode as the build, byte for byte.
+
+## Twelfth review: claims instead of payouts (October 2026)
+
+Vad's call: nothing is paid out by itself any more. `settle` no longer transfers the pot to the final leader: it keeps
+the final leader's prize in `pot` (the field now means "unclaimed prize" once a case is settled), and the keeper no
+longer pays every leader's share after settlement. One function, `claim(caseId, who)`, pays `who` what a settled case
+owes them: their share for time in the lead and, for the final leader, the prize, in one transfer and one `Claimed`
+event (it replaces `claimReign` and `ReignPaid`). Anyone may send it, so the relayer can claim for a player who joined
+by paying on Ethereum and holds no gas here; the IMD only ever goes to `who`, and the server sends it only when the
+player asks from the site. A case that is ready to settle (entries closed, docket heard) settles at the start of the
+claim, so the final leader needs one transaction; if `who` is then owed nothing, the whole call reverts, settlement
+included.
+
+What we checked (and an independent internal review of the change confirmed):
+
+- **Only the payee is paid.** Whoever sends it, `claim` pays `who` only: the prize only when `who` is the winner, the
+  share only from `reignOf[caseId][who]`.
+- **Once.** The seconds (`reignOf`) and the prize (`pot`) are zeroed before the transfer, under `nonReentrant`;
+  `_maybeSettle` makes no external call. A second claim reverts `NothingToClaim`, as does a claim on a case that can't
+  settle yet or for someone the case owes nothing.
+- **No division by zero.** `reignOf` is only ever non-zero when `firstReign` was set before the deadline, so
+  `reignTotal > 0`.
+- **Blocked wallets.** The transfer still goes through `_pay`: a refused payment lands in `unpaid` for `claimUnpaid`
+  (prize and share together, held once), so a blocked winner never blocks anything; settlement no longer transfers at
+  all.
+- **The books.** A settled case's liabilities are now `pot + reignPool - reignPaid`; the invariant
+  `invariant_BalanceEqualsLiabilities` and the fuzzers count them that way and stay exact to the wei.
+- **Nothing else reads a settled case's pot.** Filing, hearings, mistrials, `skipStalled`, `raiseReserve` and overtime
+  all require an open case or a running hearing.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | With claims only by the payee, a player who joined by paying on Ethereum may hold no gas here and couldn't collect | `claim(caseId, who)`: anyone may send it, only `who` is paid. The site asks the server to claim for a wallet with no ETH here. `test_Claim_ARelayerClaimsForAPlayerAndOnlyThePlayerIsPaid` |
+| 2 | Low | Unclaimed prizes and shares stay in the contract forever (no expiry, no sweep) | Accepted, by design: what a player is owed is theirs, with no deadline |
+| 3 | Info | A new invariant asserted something always true | Removed; `invariant_BalanceEqualsLiabilities` covers settled cases |
+| 4 | Info | No test for a blocked winner's claim, or a leader claiming after the winner | `test_Fixed_BlockedLeaderNoLongerBricksTheCase` holds and releases the claim; the relayer test claims after the winner |
+| 5 | Info | Stale comments (`canSettle` "would pay", the seed "all goes to the winner") | Fixed |
+
+Tests: `test_Claim_OnlyThePayeeClaimsAndOnlyOnceSettled`, `test_Claim_SettlesACaseThatIsReady`,
+`test_Claim_ARelayerClaimsForAPlayerAndOnlyThePlayerIsPaid`, and every settlement test now claims explicitly. Briefs is
+30 bytes under the 24 KB limit. `verify/standard-input.json` is rebuilt and compiles to the build's bytecode byte for
+byte.

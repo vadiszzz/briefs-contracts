@@ -19,7 +19,8 @@ import {BriefsJury} from "./BriefsJury.sol";
 ///         or a reworded copy keeps the precedent).
 ///         Yes: OVERRULED, the brief becomes the precedent. No: SUSTAINED. No answer in time (the panel could
 ///         not agree): MISTRIAL, the precedent stands. After the deadline the docket is still heard to the end;
-///         then the standing precedent's author takes 100% of the pot. A case runs once and never restarts.
+///         then the pot is shared: up to reignBps of it by time in the lead, the rest to the standing precedent's
+///         author. Nothing is paid out by itself: each player claims their part (claim). A case runs once.
 ///
 ///         Each entry fee waits in escrow until the brief's verdict. When its hearing opens, the oracle's price
 ///         pays the jury (at most the case's reserve: maxOracleFee when the case opens, which raiseReserve can
@@ -138,7 +139,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         uint32 answerTimeout;
         uint128 fee; // fixed entry fee
         uint128 seed;
-        uint256 pot;
+        uint256 pot; // settled: the final leader's prize until they claim it
         uint256 creatorOwed; // creator earnings not yet claimed
         uint256 creatorClaimed;
         address holdToken; // holders only: the token checked when filing (0: open to everyone)
@@ -204,7 +205,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     mapping(uint256 => uint256[]) public docketOf;
     mapping(bytes32 => uint256) public briefOfRequest;
     /// @notice seconds an author led a case before its first deadline (as a challenger who took the lead); 0 once
-    ///         their share is paid (claimReign; the ReignPaid event keeps the seconds)
+    ///         they claimed their share (claim; the Claimed event keeps the seconds)
     mapping(uint256 => mapping(address => uint256)) public reignOf;
 
     // ---------------------------------------------------------------- events
@@ -229,7 +230,9 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
     event UnpaidClaimed(address indexed to, uint256 amount);
     event ReserveRaised(uint256 indexed caseId, uint256 reserve);
     event Overtime(uint256 indexed caseId, uint256 endsAt); // a new leader late in the case pushed the deadline
-    event ReignPaid(uint256 indexed caseId, address indexed leader, uint256 seconds_, uint256 amount);
+    /// @notice a player claimed what a settled case owed them: their share for time in the lead (`seconds_` of it)
+    ///         and, for the final leader, the pot
+    event Claimed(uint256 indexed caseId, address indexed who, uint256 seconds_, uint256 reign, uint256 prize);
 
     // ---------------------------------------------------------------- errors
 
@@ -306,7 +309,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         string standard; // how two answers are compared ("The funnier brief wins."), at least 5 characters, at most 160 bytes
         string opening; // the creator's own answer, at least 1 character, at most maxBrief bytes: the first precedent
         uint8 avatar; // the face the site shows for the case (any of 256; the site falls back for unknown ones)
-        uint256 seed; // the starting pot in IMD; it all goes to the winner
+        uint256 seed; // the starting pot in IMD; it all goes into the pot
         uint256 fee; // the entry fee in IMD, fixed for the case's life
         uint64 endsAt; // entries close at this unix time, within minDuration..maxDuration from now
         uint256 minHold; // 0: anyone may file. Otherwise (owner only) only holders of at least this much holderToken
@@ -415,17 +418,28 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         imd.safeTransfer(msg.sender, total);
     }
 
-    /// @notice Pay `who` their part of a settled case's pool for time as the leader: reignPool × their seconds / all
-    ///         seconds. Anyone may call it (the keeper pays everyone out after settlement); once per leader.
-    function claimReign(uint256 caseId, address who) external nonReentrant {
+    /// @notice Pay `who` what a settled case owes them: their part of its pool for time in the lead (reignPool × their
+    ///         seconds / all seconds) and, for the final leader, the pot. Nothing is paid out by itself: a player claims
+    ///         (or a relayer for a player with no gas here; the IMD only ever goes to `who`), once. A case that is ready
+    ///         to settle settles first, so the final leader needs one transaction.
+    function claim(uint256 caseId, address who) external nonReentrant {
         Case storage c = cases[caseId];
+        if (c.status != CaseStatus.Settled && !_maybeSettle(caseId)) revert NothingToClaim();
         uint256 secs = reignOf[caseId][who];
-        if (c.status != CaseStatus.Settled || secs == 0) revert NothingToClaim();
-        reignOf[caseId][who] = 0; // paid: the seconds stay in the ReignPaid event
-        uint256 amount = (c.reignPool * secs) / c.reignTotal;
-        c.reignPaid += amount;
-        _pay(who, amount);
-        emit ReignPaid(caseId, who, secs, amount);
+        uint256 reign;
+        if (secs != 0) {
+            reignOf[caseId][who] = 0; // claimed: the seconds stay in the Claimed event
+            reign = (c.reignPool * secs) / c.reignTotal;
+            c.reignPaid += reign;
+        }
+        uint256 prize;
+        if (who == c.winner) {
+            prize = c.pot;
+            c.pot = 0;
+        }
+        if (reign + prize == 0) revert NothingToClaim();
+        _pay(who, reign + prize);
+        emit Claimed(caseId, who, secs, reign, prize);
     }
 
     /// @notice Pull a payment the token refused earlier (a pot, a refund): only to the payee, once the token lets it.
@@ -546,8 +560,8 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         _maybeSettle(caseId);
     }
 
-    /// @notice Pay the pot to the standing precedent once entries are closed and the docket is fully heard.
-    ///         Hearings call this by themselves; anyone may call it too.
+    /// @notice Settle a case once entries are closed and the docket is fully heard: the pot becomes the standing
+    ///         precedent's to claim. Hearings call this by themselves; anyone may call it too.
     function settle(uint256 caseId) external nonReentrant {
         if (!_maybeSettle(caseId)) revert TooEarly();
     }
@@ -581,7 +595,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         return docketOf[caseId].length - c.head + (c.hearing != 0 ? 1 : 0);
     }
 
-    /// @notice Whether settle(caseId) would pay now.
+    /// @notice Whether settle(caseId) would settle the case now.
     function canSettle(uint256 caseId) public view returns (bool) {
         Case storage c = cases[caseId];
         return c.status == CaseStatus.Open && block.timestamp >= c.endsAt && c.hearing == 0
@@ -796,8 +810,7 @@ contract Briefs is ReentrancyGuard, Ownable2Step {
         c.reignPool = pool;
         c.status = CaseStatus.Settled;
         c.winner = winner;
-        c.pot = 0;
-        _pay(winner, prize);
+        c.pot = prize; // the final leader's, until they claim it
         emit CaseSettled(caseId, winner, c.precedent, prize);
         return true;
     }
